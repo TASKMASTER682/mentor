@@ -5,17 +5,23 @@ import TestAttempt from '../models/TestAttempt.js'
 import { extractUPSCVisualMap } from './pdfService.js'; // New function to extract question text from test PDFs
 
 
-const groq = new OpenAI({
-  apiKey: process.env.GROQ_API_KEY ,
-  baseURL: "https://api.groq.com/openai/v1"
-});
+let groq = null;
+const getGroqClient = () => {
+  if (!groq) {
+    groq = new OpenAI({
+      apiKey: process.env.GROQ_API_KEY,
+      baseURL: "https://api.groq.com/openai/v1"
+    });
+  }
+  return groq;
+};
 let openai = null;
 
 const getOpenAIClient = () => {
   if (!openai) {
     openai = new OpenAI({
-      baseURL: process.env.NVIDIA_API_URL || 'https://integrate.api.nvidia.com/v1',
-      apiKey: process.env.NVIDIA_API_KEY || process.env.OPENAI_API_KEY
+      baseURL: process.env.NVIDIA_API_URL,
+      apiKey: process.env.NVIDIA_API_KEY 
     });
   }
   return openai;
@@ -639,7 +645,7 @@ async function getQuestionsCrux(wrongQuestions) {
       `Q${q.questionNumber}: ${q.questionText}`
     ).join("\n\n");
 
-    const response = await groq.chat.completions.create({
+    const response = await getGroqClient().chat.completions.create({
       model: "llama-3.1-8b-instant",
       messages: [
         { 
@@ -666,4 +672,3 @@ async function getQuestionsCrux(wrongQuestions) {
     return validQuestions.map(q => q.topic || q.questionText?.slice(0, 100));
   }
 }
-
