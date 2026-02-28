@@ -1,0 +1,16 @@
+# Dependency folders (Ye bahut heavy hote hain)
+node_modules/
+
+# Local environment variables (Inme aapki API keys hoti hain)
+.env
+.env.local
+.env.*.local
+
+# Build folders
+dist/
+build/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

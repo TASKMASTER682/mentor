@@ -1,0 +1,471 @@
+import express from 'express';
+import fs from 'fs';
+import { authenticate } from '../middleware/auth.js';
+import { uploadPDFs } from '../middleware/upload.js';
+import MockTest from '../models/MockTest.js';
+import TestAttempt from '../models/TestAttempt.js';
+import { 
+  extractUPSCVisualMap,
+  streamPdfToResponse, 
+  extractAnswerKeyFromSolutionPdf, 
+  extractQuestionPaperMap,
+  uploadFileToUploadthing,
+  extractAndStoreQuestionText
+} from '../services/pdfService.js';
+import { aiService} from '../services/aiService.js';
+import { calculateScore } from '../services/scoringService.js';
+import { UTApi } from "uploadthing/server";
+
+const utapi = new UTApi();
+
+const router = express.Router();
+router.use(authenticate);
+
+const unlinkIfExists = async (filePath) => {
+  if (!filePath) return;
+  try {
+    await fs.promises.access(filePath);
+    await fs.promises.unlink(filePath);
+  } catch (err) {
+    if (err?.code !== 'ENOENT') {
+      console.error(`[MockTest] Failed to delete file "${filePath}":`, err.message);
+    }
+  }
+};
+router.get('/', async (req, res) => {
+  try {
+    const tests = await MockTest.find({ userId: req.user._id })
+      .select('-answerKey')
+      .sort({ createdAt: -1 });
+    res.json(tests);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+router.get('/attempts/all/list', async (req, res) => {
+  try {
+    const limit = Number(req.query.limit);
+
+    let query = TestAttempt.find({ userId: req.user._id })
+      .populate('mockTestId', 'name testType totalQuestions durationMinutes markCorrect markWrong testSeriesId')
+      .sort({ submittedAt: -1 });
+
+    if (Number.isFinite(limit) && limit > 0) {
+      query = query.limit(limit);
+    }
+
+    const attempts = await query;
+
+    res.json(attempts);
+  } catch (err) {
+    console.error('Error fetching all attempts:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+router.post('/upload', uploadPDFs, async (req, res) => {
+  let mockTest = null;
+  try {
+    // 1. Validation
+    if (!req.files?.testPdf?.[0] || !req.files?.solutionPdf?.[0]) {
+      return res.status(400).json({ error: 'Both Test PDF and Solution PDF are required' });
+    }
+
+    const testFile = req.files.testPdf[0];
+    const solutionFile = req.files.solutionPdf[0];
+    const totalQ = Math.max(1, parseInt(req.body.totalQuestions) || 100);
+    
+    const topicsArray = req.body.topics 
+      ? req.body.topics.split(',').map(t => t.trim()).filter(t => t !== "")
+      : [];
+
+    // 2. Initial Create (Local Paths)
+    mockTest = new MockTest({
+      userId: req.user._id,
+      testSeriesId: req.body.testSeriesId || null, 
+      name: req.body.name?.trim() || testFile.originalname.replace(/\.pdf$/i, ''),
+      testType: req.body.testType || 'prelims_gs',
+      subject: req.body.subject, 
+      topics: topicsArray,
+      totalQuestions: totalQ,
+      durationMinutes: parseInt(req.body.durationMinutes) || 120,
+      markCorrect: parseFloat(req.body.markCorrect) || 2.0,
+      markWrong: parseFloat(req.body.markWrong) || -0.66,
+      testPdfPath: testFile.path, 
+      solutionPdfPath: solutionFile.path,
+      testPdfName: testFile.originalname,
+      solutionPdfName: solutionFile.originalname,
+      status: 'processing',
+    });
+
+    await mockTest.save();
+
+    // 3. Solution Processing (Answer Key extraction)
+    // NOTE: Agar processAnswerKey ke andar solution ko cloud pe upload kar rahe ho, 
+    // toh wahan ensure karna ki sirf .ufsUrl string save ho!
+    processAnswerKey(mockTest._id, solutionFile.path, totalQ).catch(async (err) => {
+      console.error(`[MockTest ${mockTest._id}] Solution Error:`, err.message);
+      await MockTest.findByIdAndUpdate(mockTest._id, { 
+        status: 'error', 
+        processingError: String(err.message) 
+      });
+    });
+
+    // 4. SMART SYNC: Dono PDFs ko Cloud par bhejna
+    const syncToCloud = async () => {
+      try {
+        const { uploadFileToUploadthing, extractAndStoreQuestionText } = await import('../services/pdfService.js'); 
+        const fs = await import('fs');
+
+        
+        // --- Sync Test PDF ---
+        const testUpload = await uploadFileToUploadthing(testFile.path);
+        const testCloudUrl = testUpload?.ufsUrl || testUpload?.url;
+
+        // --- Sync Solution PDF (Yahan CastError aa raha tha) ---
+        const solutionUpload = await uploadFileToUploadthing(solutionFile.path);
+        const solutionCloudUrl = solutionUpload?.ufsUrl || solutionUpload?.url;
+
+        if (testCloudUrl && solutionCloudUrl) {
+          // DATABASE UPDATE: Sirf Strings bhej rahe hain
+          await MockTest.findByIdAndUpdate(mockTest._id, { 
+            testPdfPath: testCloudUrl,        // String
+            testPdfKey: testUpload.key,        // String
+            solutionPdfPath: solutionCloudUrl,  // String (FIXED CAST ERROR)
+            solutionPdfKey: solutionUpload.key, // String
+            status: 'ready' 
+          });
+                    
+          // Cleanup Local Files
+          if (fs.existsSync(testFile.path)) fs.unlinkSync(testFile.path);
+          if (fs.existsSync(solutionFile.path)) fs.unlinkSync(solutionFile.path);
+          
+          // --- NEW: Extract Question Text for AI Analysis ---
+          try {
+            // Use the cloud URL for OCR since local file is deleted
+            await extractAndStoreQuestionText(mockTest._id, testCloudUrl);
+          } catch (extractErr) {
+            console.error(`[MockTest ${mockTest._id}] Question text extraction failed:`, extractErr.message);
+            // Don't fail the entire upload process if text extraction fails
+          }
+          
+        } else {
+          throw new Error("One or both cloud uploads failed.");
+        }
+      } catch (cloudErr) {
+        console.error(`[CRITICAL] Sync Error:`, cloudErr.message);
+        await MockTest.findByIdAndUpdate(mockTest._id, { status: 'error' });
+      }
+    };
+
+    syncToCloud();
+
+    res.status(201).json({ 
+      mockTestId: mockTest._id, 
+      status: 'processing', 
+      name: mockTest.name 
+    });
+
+  } catch (err) {
+    console.error("Upload Route Error:", err.message);
+    const fs = await import('fs');
+    [req.files?.testPdf?.[0]?.path, req.files?.solutionPdf?.[0]?.path].forEach(p => {
+        if (p && fs.existsSync(p)) fs.unlinkSync(p);
+    });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/:id/pdf', async (req, res) => {
+  try {
+    // 1. Auth Check (Token Header mein ho ya Query string mein)
+    // Frontend ab query mein bhejege: ?token=xyz
+    const token = req.headers.authorization?.split(' ')[1] || req.query.token;
+    
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    // Yahan aap apna manual JWT verify logic bhi daal sakte hain agar middleware bypass ho raha ho
+    // Maan lete hain req.user._id mil raha hai (warna query se verify karein)
+
+    const test = await MockTest.findById(req.params.id).select('testPdfPath');
+
+    if (!test || !test.testPdfPath) {
+      return res.status(404).json({ error: 'Test PDF not found' });
+    }
+
+    // Call our smart service
+    return streamPdfToResponse(test.testPdfPath, req, res);
+
+  } catch (err) {
+    console.error("[Route Error] PDF Stream failed:", err);
+    res.status(500).json({ error: "Could not retrieve PDF" });
+  }
+});
+
+
+router.get('/:id/status', async (req, res) => {
+  try {
+    const test = await MockTest.findOne({ _id: req.params.id, userId: req.user._id })
+      .select('status processingError totalQuestions name answerKeyCount questionTextExtractionStatus');
+    if (!test) return res.status(404).json({ error: 'Test not found' });
+    res.json({
+      status: test.status,
+      error: test.processingError,
+      answerKeyCount: test.answerKeyCount || 0,
+      totalQuestions: test.totalQuestions,
+      name: test.name,
+      questionTextExtractionStatus: test.questionTextExtractionStatus || 'pending'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+router.get('/attempts/:attemptId', async (req, res) => {
+  try {
+    const attempt = await TestAttempt.findOne({ _id: req.params.attemptId, userId: req.user._id })
+      .populate('mockTestId', 'name testType totalQuestions markCorrect markWrong');
+    if (!attempt) return res.status(404).json({ error: 'Attempt not found' });
+    res.json(attempt);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+router.post('/:id/submit', async (req, res) => {
+  try {
+    const { userAnswers, timeTakenMinutes } = req.body;
+    
+    const mockTest = await MockTest.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!mockTest) {
+      console.error(`[Submission] Test not found: ${req.params.id} for user: ${req.user._id}`);
+      return res.status(404).json({ error: 'Test not found' });
+    }
+
+    const markingScheme = {
+      CORRECT: Number(mockTest.markCorrect) || 2,
+      WRONG: Number(mockTest.markWrong) || -0.66,
+      UNATTEMPTED: Number(mockTest.markUnattempted) || 0,
+    };
+
+    const result = calculateScore(userAnswers, mockTest.answerKey, markingScheme);
+
+    const attempt = new TestAttempt({
+      userId: req.user._id,
+      mockTestId: mockTest._id,
+      testName: mockTest.name,
+      userAnswers: result.userAnswers, // Isme isCorrect status honi chahiye
+      score: result.score,
+      maxScore: result.maxScore || 0,
+      percentage: result.percentage || 0,
+      correctCount: result.correctCount || 0,
+      wrongCount: result.wrongCount || 0,
+      unattemptedCount: result.unattemptedCount || 0,
+      timeTakenMinutes: timeTakenMinutes || 0,
+      testSeriesId: mockTest.testSeriesId, // Pass testSeriesId from mockTest
+      feedbackStatus: 'pending' // Changed to 'pending' for proper polling
+    });
+
+    await attempt.save();
+    // Fix: correct pdf path picking
+    const pdfUrl = mockTest.file?.ufsUrl || mockTest.file?.url || mockTest.testPdfPath;
+
+    // Background Process
+    if (pdfUrl) {
+      // Generate feedback in background
+      generateAndSaveFeedback(attempt._id, attempt, mockTest, req.user, pdfUrl)
+        .catch(err => console.error("Background AI Error:", err));
+    }
+
+    res.status(201).json({
+      attemptId: attempt._id,
+      ...result,
+      pollingAI: true // Frontend ko bolo loader dikhaye
+    });
+
+  } catch (err) {
+    console.error("Submission Route Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/:id', async (req, res) => {
+  try {
+    const test = await MockTest.findOne({ _id: req.params.id, userId: req.user._id }).select('-answerKey');
+    if (!test) return res.status(404).json({ error: 'Test not found' });
+    res.json(test);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+router.delete('/:id', async (req, res) => {
+    try {
+        const test = await MockTest.findOne({ _id: req.params.id, userId: req.user._id });
+        if (!test) return res.status(404).json({ error: 'Test not found' });
+
+        // 1. Uploadthing se delete (Using keys)
+        const keysToDelete = [];
+        if (test.testPdfKey) keysToDelete.push(test.testPdfKey);
+        if (test.solutionPdfKey) keysToDelete.push(test.solutionPdfKey);
+
+        if (keysToDelete.length > 0) {
+            await utapi.deleteFiles(keysToDelete).catch(err => console.error("UT Delete Error:", err));
+        }
+
+        // 2. Database cleanup
+        await MockTest.findByIdAndDelete(req.params.id);
+        await TestAttempt.deleteMany({ mockTestId: req.params.id });
+
+        res.json({ success: true, message: "Deleted from Cloud and DB" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+
+async function processAnswerKey(mockTestId, solutionPdfPath, totalQ) {
+  try {
+    const { regexParsed, answerKeySection } = await extractAnswerKeyFromSolutionPdf(solutionPdfPath);
+    const finalKey = await aiService.parseAnswerKeyFromText({ answerKeySection, regexParsed, totalQuestions: totalQ });
+    
+    const keyEntries = Object.entries(finalKey).filter(([k, v]) => !isNaN(parseInt(k)));
+    const answerKeyMap = new Map(keyEntries.map(([k, v]) => [String(k), String(v).toUpperCase()]));
+
+    // --- NEW: Cloudinary par bhejo aur local delete karo ---
+    const cloudinaryUrl = await uploadFileToUploadthing(solutionPdfPath);
+
+    await MockTest.findByIdAndUpdate(mockTestId, {
+      answerKey: answerKeyMap,
+      answerKeyCount: answerKeyMap.size,
+      solutionPdfPath: cloudinaryUrl || solutionPdfPath, // URL save karo
+      status: 'ready',
+    });
+  } catch (err) {
+    console.error("Processing error:", err);
+    // Error case mein bhi file delete karne ki koshish karein
+    if (fs.existsSync(solutionPdfPath)) fs.unlinkSync(solutionPdfPath);
+    throw err;
+  }
+}
+
+
+
+async function generateAndSaveFeedback(attemptId, attempt, mockTest, user, pdfUrl) {
+  try {
+    console.log(`[Arjun AI] Starting Analysis for Attempt: ${attemptId}`);
+
+    // --- STEP 1: Fetch Real Question Text from MockTest ---
+    let questionTextMap = new Map();
+    
+    if (mockTest.questions && Array.isArray(mockTest.questions)) {
+      mockTest.questions.forEach(q => {
+        questionTextMap.set(q.questionNumber, q.text);
+      });
+    }
+
+    const baseAnswers = Array.isArray(attempt.userAnswers) ? attempt.userAnswers : [];
+    
+    // Build question bank with proper text
+    const questionBank = baseAnswers.map(ans => {
+      const questionText = questionTextMap.get(ans.questionNumber) || 
+                          ans.questionText || 
+                          `Question ${ans.questionNumber} text not available.`;
+      
+      return {
+        questionNumber: ans.questionNumber,
+        questionText: questionText,
+        userChoice: ans.answer ?? 'Unattempted',
+        correctAnswer: ans.correctAnswer ?? 'N/A',
+        isCorrect: ans.isCorrect ?? false
+      };
+    });
+
+    // console.log(`[Arjun AI] Question bank built with ${questionBank.length} questions`);
+    // console.log("Sample question text:", questionBank[0]?.questionText?.slice(0, 100));
+
+    // --- STEP 2: AI Analysis Call ---
+    const analysis = await aiService.generateTestPerformanceReview({
+      user,
+      attempt,
+      mockTest,
+      questionBank,
+      pdfUrl 
+    });
+
+    // --- STEP 3: Update Database ---
+    if (analysis) {
+      // Data Normalization for Schema Sync
+      const finalWeakAreas = Array.isArray(analysis.topicList) ? analysis.topicList : [];
+      const finalDeepAnalysis = Array.isArray(analysis.deepAnalysis) ? analysis.deepAnalysis : [];
+
+      await TestAttempt.findByIdAndUpdate(attemptId, { 
+        aiFeedback: analysis,
+        weakAreas: finalWeakAreas,
+        deepAnalysis: finalDeepAnalysis,
+        feedbackStatus: 'completed' 
+      });
+      
+      // console.log(`[Arjun AI] Analysis Completed and Saved: ${attemptId}`);
+      
+      // // --- NEW: Log AI Analysis Details ---
+      // console.log(`\n=== AI ANALYSIS SUMMARY FOR ATTEMPT ${attemptId} ===`);
+      // console.log(`Headline: ${analysis.headline}`);
+      // console.log(`Strengths: ${analysis.summary?.strengths?.join(', ') || 'N/A'}`);
+      // console.log(`Study Recommendations: ${analysis.summary?.studyRecommendations || 'N/A'}`);
+      // console.log(`Weak Areas: ${analysis.topicList?.join(', ') || 'N/A'}`);
+      // console.log(`Strategy Points: ${analysis.strategy?.slice(0, 3).join(' | ') || 'N/A'}`);
+      // console.log(`Deep Analysis Count: ${analysis.deepAnalysis?.length || 0}`);
+      
+      // Log first few deep analysis items
+      if (analysis.deepAnalysis && analysis.deepAnalysis.length > 0) {
+        console.log(`\n--- SAMPLE DEEP ANALYSIS ---`);
+        analysis.deepAnalysis.slice(0, 3).forEach((item, index) => {
+          console.log(`${index + 1}. Q${item.qNo} (${item.topic}): ${item.analysis}`);
+        });
+      }
+      console.log(`=== END AI ANALYSIS ===\n`);
+      
+    } else {
+      console.error(`[Arjun AI] Analysis returned null for attempt: ${attemptId}`);
+      await TestAttempt.findByIdAndUpdate(attemptId, { feedbackStatus: 'failed' });
+    }
+
+    // --- STEP 4: Cleanup ---
+    const localPath = mockTest.testPdfPath || mockTest.filePath;
+    if (localPath && !localPath.startsWith('http')) {
+       await unlinkIfExists(localPath).catch(() => {});
+    }
+
+  } catch (err) {
+    console.error("ARJUN ENGINE CRITICAL ERROR:", err);
+    console.error("Stack trace:", err.stack);
+    
+    try {
+      await TestAttempt.findByIdAndUpdate(attemptId, { 
+        feedbackStatus: 'failed',
+        processingError: err.message 
+      });
+    } catch (updateErr) {
+      console.error("Failed to update attempt status:", updateErr);
+    }
+    
+    // Cleanup on error
+    try {
+      const localPath = mockTest.testPdfPath || mockTest.filePath;
+      if (localPath && !localPath.startsWith('http')) {
+          await unlinkIfExists(localPath).catch(() => {});
+      }
+    } catch (cleanupErr) {
+      console.error("Cleanup error:", cleanupErr);
+    }
+  }
+}
+export default router;
+
