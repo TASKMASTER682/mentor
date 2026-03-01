@@ -10,6 +10,7 @@ router.use(authenticate);
 router.get('/', async (req, res) => {
   try {
     const missions = await Mission.find({ userId: req.user._id }).sort({ priority: 1, deadline: 1 });
+
     res.json(missions);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -27,6 +28,7 @@ router.post('/', async (req, res) => {
       });
     });
 
+
     const deadlineDate = new Date(deadline);
     const now = new Date();
     const daysAvailable = Math.ceil((deadlineDate - now) / (1000 * 60 * 60 * 24));
@@ -34,7 +36,7 @@ router.post('/', async (req, res) => {
     if (daysAvailable <= 0) return res.status(400).json({ error: 'Deadline must be in the future' });
 
     const totalHoursNeeded = allChapters.reduce((sum, ch) => sum + ch.estimatedHours, 0);
-    const availableHoursPerDay = user.profile.dailyStudyHours * 0.4; // 40% of daily hours for mission
+    const availableHoursPerDay = user.profile.dailyStudyHours * 0.6; // 60% of daily hours for mission
     const totalAvailableHours = availableHoursPerDay * daysAvailable;
 
     let warning = null;
@@ -48,17 +50,13 @@ router.post('/', async (req, res) => {
     });
     const dailyPlan = [];
     let chapterQueue = [...allChapters];
+    const chaptersPerDay = Math.ceil(allChapters.length / daysAvailable);
     for (let i = 0; i < daysAvailable && chapterQueue.length > 0; i++) {
       const date = new Date(now);
       date.setDate(date.getDate() + i);
-      const dayChapters = [];
-      let dayHours = 0;
-      while (chapterQueue.length > 0 && dayHours + chapterQueue[0].estimatedHours <= availableHoursPerDay) {
-        const ch = chapterQueue.shift();
-        dayChapters.push(ch.title);
-        dayHours += ch.estimatedHours;
-      }
-      if (dayChapters.length > 0) dailyPlan.push({ date, chapters: dayChapters, estimatedHours: dayHours, completed: false });
+      const dayChapters = chapterQueue.splice(0, chaptersPerDay);
+      const dayHours = dayChapters.reduce((sum, ch) => sum + ch.estimatedHours, 0);
+      if (dayChapters.length > 0) dailyPlan.push({ date, chapters: dayChapters.map(ch => ch.title), estimatedHours: dayHours, completed: false });
     }
 
     const mission = new Mission({
