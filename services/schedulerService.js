@@ -113,7 +113,7 @@ export const schedulerService = {
         const last = currentSchedule.blocks[currentSchedule.blocks.length - 1];
         return normalizeWindow({ startTime: first?.startTime, endTime: last?.endTime });
       })();
-      const effectiveWindow = normalizeWindow(scheduleWindow) || inferredWindow;
+      let effectiveWindow = normalizeWindow(scheduleWindow) || inferredWindow;
 if (!effectiveWindow) {
   const now = new Date();
   const startMinutes = (now.getHours() * 60) + now.getMinutes();
