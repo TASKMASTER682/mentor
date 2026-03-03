@@ -131,12 +131,14 @@ export const schedulerService = {
         };
       }
 
+      const targetDateStr = targetDate.toISOString().slice(0, 10);
       const blocks = await aiService.generateSchedule({
         user, sources, activeMissions, recentEntries,
         avoidedSubjects: allWeakSubjects,
         additionalInstruction,
         currentScheduleBlocks: Array.isArray(currentSchedule?.blocks) ? currentSchedule.blocks : [],
         scheduleWindow: effectiveWindow,
+        targetDateStr
       });
 
       const fitBlocksToWindow = (inputBlocks = [], window) => {

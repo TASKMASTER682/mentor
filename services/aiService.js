@@ -186,7 +186,7 @@ export const aiService = {
     }
   },
 
-  async generateSchedule({ user, activeMissions, sources, recentEntries, avoidedSubjects = [], additionalInstruction = '', currentScheduleBlocks = [], scheduleWindow = null }) {
+  async generateSchedule({ user, activeMissions, sources, recentEntries, avoidedSubjects = [], additionalInstruction = '', currentScheduleBlocks = [], scheduleWindow = null, targetDateStr = '' }) {
     try {
       const SCHEDULER_SYSTEM_PROMPT = `You are a Precision UPSC Scheduler. 
 Your goal is to interleave Mandatory tasks with Mission-specific tasks.
@@ -200,13 +200,11 @@ CORE PROTOCOLS:
 
 OUTPUT: JSON ARRAY ONLY. [{"subject": string, "focus": string, "startTime": "HH:MM", "endTime": "HH:MM", "priority": number, "taskType": string}]`;
 
-      const now = new Date();
-      // Use local date for filtering plan
-      const todayStr = now.toLocaleDateString('en-CA'); // YYYY-MM-DD
+      const todayStr = targetDateStr || new Date().toISOString().slice(0, 10);
 
       const prunedMissions = activeMissions.map(m => {
         const todayTasks = (m.dailyPlan || []).filter(p => {
-          const pDateStr = new Date(p.date).toLocaleDateString('en-CA');
+          const pDateStr = new Date(p.date).toISOString().slice(0, 10);
           return pDateStr === todayStr && !p.completed;
         });
 
