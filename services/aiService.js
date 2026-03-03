@@ -164,7 +164,7 @@ export const aiService = {
     try {
       const userId = user._id;
       const today = new Date();
-      today.setHours(0, 0, 0, 0);
+      today.setUTCHours(0, 0, 0, 0);
       const [dailyLogs, activeMissions, todayAttempts] = await Promise.all([
         DailyTracker.find({ userId }).sort({ date: -1 }).limit(3),
         Mission.find({ userId, status: 'active' }),
@@ -190,20 +190,24 @@ export const aiService = {
     try {
       const SCHEDULER_SYSTEM_PROMPT = `You are a Precision UPSC Scheduler. 
 Your goal is to interleave Mandatory tasks with Mission-specific tasks.
+
 CORE PROTOCOLS:
-- MISSION INTEGRATION (CRITICAL): All active missions MUST have slots in the schedule.
-- INTERLEAVE: Mix mandatory tasks with mission study blocks.
-- MANDATORY: 1h Fitness, 1h Answer Writing, 2h CSAT (alternate days).
-- OUTPUT: JSON ARRAY ONLY. [{"subject": string, "focus": string, "startTime": "HH:MM", "endTime": "HH:MM", "priority": number, "taskType": string}]`;
+1. MISSION PRIORITY: Use the "Today Plan" from active missions. These are top priority.
+2. MERGE MANDATORY: If a mission involves Answer Writing or MCQ practice, that block fulfills BOTH the mission and the mandatory requirement. DO NOT create two separate blocks for the same activity.
+3. AVOID DUPLICATION: Do not give multiple separate slots to one mission unless the hours required exceed a single block's capacity (usually 2-3h).
+4. RELEVANCE: Focus on specific topics/chapters provided in the mission's todayPlan.
+5. MANDATORY DEFAULTS: 1h Fitness, 1h Answer Writing, 2h CSAT (alternate days).
 
-      const todayStr = new Date().toISOString().split('T')[0];
+OUTPUT: JSON ARRAY ONLY. [{"subject": string, "focus": string, "startTime": "HH:MM", "endTime": "HH:MM", "priority": number, "taskType": string}]`;
 
-      // Prune data to avoid huge payloads (exclude full syllabus)
+      const now = new Date();
+      // Use local date for filtering plan
+      const todayStr = now.toLocaleDateString('en-CA'); // YYYY-MM-DD
+
       const prunedMissions = activeMissions.map(m => {
-        // Only send today's plan to save tokens and focus AI
         const todayTasks = (m.dailyPlan || []).filter(p => {
-          const pDate = new Date(p.date).toISOString().split('T')[0];
-          return pDate === todayStr && !p.completed;
+          const pDateStr = new Date(p.date).toLocaleDateString('en-CA');
+          return pDateStr === todayStr && !p.completed;
         });
 
         return {
@@ -222,14 +226,16 @@ CORE PROTOCOLS:
       }));
 
       const prompt = `CURRENT DATE: ${todayStr}
-      Student: ${user.name}
-      ACTIVE MISSIONS (IDENTIFIED): ${JSON.stringify(prunedMissions)}
-      Library Sources: ${JSON.stringify(prunedSources)}
-      Window: ${scheduleWindow?.startTime} to ${scheduleWindow?.endTime}
-      Instructions: ${additionalInstruction}
-      
-      CRITICAL: You MUST include at least one slot for EVERY subject listed in ACTIVE MISSIONS. 
-      If 'todayPlan' is empty, still create a mission slot for that subject using the 'dailyHoursRequired' as duration weight.`;
+Student: ${user.name}
+ACTIVE MISSIONS (INTEGRATE THESE): ${JSON.stringify(prunedMissions)}
+Library Context: ${JSON.stringify(prunedSources)}
+Available Window: ${scheduleWindow?.startTime} to ${scheduleWindow?.endTime}
+User Custom Instruction: ${additionalInstruction}
+
+INSTRUCTIONS:
+- For each Mission, create a block using topics from 'todayPlan'.
+- If a mission's todayPlan involves writing or practice, set taskType to 'answer_writing' or 'mcq'.
+- Ensure "Answer Writing" (1h) and "Fitness" (1h) are covered. If a mission handles Answer Writing, just add the rest of the mandatory tasks (Fitness/CSAT).`;
 
       const response = await getOpenAIClient().chat.completions.create({
         model: 'yentinglin/llama-3-taiwan-70b-instruct',
@@ -278,7 +284,7 @@ CORE PROTOCOLS:
       const systemPrompt = `You are ARJUN, a high-performance UPSC Mentor. 
 Speak DIRECTLY to the student (use "You", "Your", "You missed"). 
 Do not give generic advice. Be extremely granular with topics. 
-Instead of "Polity", identify the exact sub-topic like "Governor's Pardoning Power" or "Fundamental Duties".
+For example Instead of "Polity", identify the exact sub-topic like "Governor's Pardoning Power" or "Fundamental Duties",instead of Economy identify the exact sub-topic like "GDP vs GVA",instead of Environment identify the exact sub-topic like "Biodiversity Hotspots" and so on as per the question.
 
 Return ONLY JSON:
 { 

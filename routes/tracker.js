@@ -1,5 +1,3 @@
-
-
 import express from 'express';
 import { authenticate } from '../middleware/auth.js';
 import DailyTracker from '../models/DailyTracker.js';
@@ -8,6 +6,7 @@ import { aiService } from '../services/aiService.js';
 
 const router = express.Router();
 router.use(authenticate);
+
 router.get('/', async (req, res) => {
   try {
     const { days = 30 } = req.query;
@@ -19,12 +18,15 @@ router.get('/', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 router.post('/', async (req, res) => {
   try {
-    const { 
-      tasks, focusScore, energyLevel, mood, 
-      notesPrepared, topicsNotUnderstood, notes, totalStudyHours 
+    const {
+      tasks, focusScore, energyLevel, mood,
+      notesPrepared, topicsNotUnderstood, notes, totalStudyHours,
+      date: dateStr
     } = req.body;
+
     const safeTasks = Array.isArray(tasks) ? tasks : [];
     const safeTopics = Array.isArray(topicsNotUnderstood)
       ? topicsNotUnderstood
@@ -33,24 +35,27 @@ router.post('/', async (req, res) => {
         : [];
     const safeTotalStudyHours = Number(totalStudyHours);
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // Normalize date to UTC-midnight
+    const targetDate = dateStr ? new Date(dateStr) : new Date();
+    targetDate.setUTCHours(0, 0, 0, 0);
+
     const completedTasks = safeTasks.filter(t => t?.status === 'completed').length;
     const completionRate = safeTasks.length > 0 ? Math.round((completedTasks / safeTasks.length) * 100) : 0;
     const computedStudyHours = safeTasks.reduce((sum, t) => sum + (Number(t?.actualHours) || 0), 0);
+
     let aiInsight = "Great effort today! ARJUN is tracking your progress.";
     try {
       const recentEntries = await DailyTracker.find({ userId: req.user._id }).sort({ date: -1 }).limit(7);
-      aiInsight = await aiService.generateDailyInsight({ 
-        tasks: safeTasks, focusScore, mood, energyLevel, 
+      aiInsight = await aiService.generateDailyInsight({
+        tasks: safeTasks, focusScore, mood, energyLevel,
         completionRate, notesPrepared, topicsNotUnderstood,
-        recentEntries 
+        recentEntries
       });
     } catch (aiErr) {
       console.error("AI Insight Generation Failed:", aiErr.message);
     }
 
-    const data = { 
+    const data = {
       tasks: safeTasks,
       focusScore,
       energyLevel,
@@ -60,30 +65,38 @@ router.post('/', async (req, res) => {
       notes,
       totalStudyHours: !isNaN(safeTotalStudyHours) ? safeTotalStudyHours : computedStudyHours,
       completionRate,
-      aiInsight 
+      aiInsight
     };
-    let entry = await DailyTracker.findOne({ userId: req.user._id, date: today });
+
+    let entry = await DailyTracker.findOne({ userId: req.user._id, date: targetDate });
 
     if (entry) {
       Object.assign(entry, data);
     } else {
-      entry = new DailyTracker({ userId: req.user._id, date: today, ...data });
+      entry = new DailyTracker({ userId: req.user._id, date: targetDate, ...data });
     }
     await entry.save();
-    const user = await User.findById(req.user._id); // Re-fetch to be safe
+
+    const user = await User.findById(req.user._id);
     const lastDate = user.stats.lastStudyDate;
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
+
+    // Streak logic using UTC dates for consistency
+    const yesterday = new Date(targetDate);
+    yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+
     if (completionRate > 30) {
-      if (lastDate && new Date(lastDate).toDateString() === yesterday.toDateString()) {
+      const lastDateObj = lastDate ? new Date(lastDate) : null;
+      if (lastDateObj) lastDateObj.setUTCHours(0, 0, 0, 0);
+
+      if (lastDateObj && lastDateObj.getTime() === yesterday.getTime()) {
         user.stats.studyStreak += 1;
-      } else if (!lastDate || new Date(lastDate).toDateString() !== today.toDateString()) {
+      } else if (!lastDateObj || lastDateObj.getTime() !== targetDate.getTime()) {
         user.stats.studyStreak = 1;
       }
-      
+
       user.stats.longestStreak = Math.max(user.stats.longestStreak, user.stats.studyStreak);
       user.stats.totalStudyDays += 1;
-      user.stats.lastStudyDate = today;
+      user.stats.lastStudyDate = targetDate;
       await user.save();
     }
 
@@ -95,4 +108,3 @@ router.post('/', async (req, res) => {
 });
 
 export default router;
-

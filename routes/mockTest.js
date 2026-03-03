@@ -4,16 +4,16 @@ import { authenticate } from '../middleware/auth.js';
 import { uploadPDFs } from '../middleware/upload.js';
 import MockTest from '../models/MockTest.js';
 import TestAttempt from '../models/TestAttempt.js';
-import { 
+import {
   extractUPSCVisualMap,
-  streamPdfToResponse, 
-  extractAnswerKeyFromSolutionPdf, 
+  streamPdfToResponse,
+  extractAnswerKeyFromSolutionPdf,
   extractQuestionPaperMap,
   uploadFileToUploadthing,
   extractAndStoreQuestionText,
   processTestPaperImages
 } from '../services/pdfService.js';
-import { aiService} from '../services/aiService.js';
+import { aiService } from '../services/aiService.js';
 import { calculateScore } from '../services/scoringService.js';
 import { UTApi } from "uploadthing/server";
 
@@ -77,24 +77,24 @@ router.post('/upload', uploadPDFs, async (req, res) => {
     const testFile = req.files.testPdf[0];
     const answerKeyText = req.body.answerKeyText || '';
     const totalQ = Math.max(1, parseInt(req.body.totalQuestions) || 100);
-    
-    const topicsArray = req.body.topics 
+
+    const topicsArray = req.body.topics
       ? req.body.topics.split(',').map(t => t.trim()).filter(t => t !== "")
       : [];
 
     // 2. Initial Create (Local Paths)
     mockTest = new MockTest({
       userId: req.user._id,
-      testSeriesId: req.body.testSeriesId || null, 
+      testSeriesId: req.body.testSeriesId || null,
       name: req.body.name?.trim() || testFile.originalname.replace(/\.pdf$/i, ''),
       testType: req.body.testType || 'prelims_gs',
-      subject: req.body.subject, 
+      subject: req.body.subject,
       topics: topicsArray,
       totalQuestions: totalQ,
       durationMinutes: parseInt(req.body.durationMinutes) || 120,
       markCorrect: parseFloat(req.body.markCorrect) || 2.0,
       markWrong: parseFloat(req.body.markWrong) || -0.66,
-      testPdfPath: testFile.path, 
+      testPdfPath: testFile.path,
       solutionPdfPath: null,
       testPdfName: testFile.originalname,
       solutionPdfName: null,
@@ -106,23 +106,23 @@ router.post('/upload', uploadPDFs, async (req, res) => {
     // 3. Visual Processing: Crop questions and parse answer key from text
     processTestWithTextAnswerKey(mockTest._id, testFile.path, answerKeyText, totalQ).catch(async (err) => {
       console.error(`[MockTest ${mockTest._id}] Processing Error:`, err.message);
-      await MockTest.findByIdAndUpdate(mockTest._id, { 
-        status: 'error', 
-        processingError: String(err.message) 
+      await MockTest.findByIdAndUpdate(mockTest._id, {
+        status: 'error',
+        processingError: String(err.message)
       });
     });
 
     res.status(201).json({
-      mockTestId: mockTest._id, 
-      status: 'processing', 
-      name: mockTest.name 
+      mockTestId: mockTest._id,
+      status: 'processing',
+      name: mockTest.name
     });
 
   } catch (err) {
     console.error("Upload Route Error:", err.message);
     const fs = await import('fs');
     [req.files?.testPdf?.[0]?.path, req.files?.solutionPdf?.[0]?.path].forEach(p => {
-        if (p && fs.existsSync(p)) fs.unlinkSync(p);
+      if (p && fs.existsSync(p)) fs.unlinkSync(p);
     });
     res.status(500).json({ error: err.message });
   }
@@ -133,7 +133,7 @@ router.get('/:id/pdf', async (req, res) => {
     // 1. Auth Check (Token Header mein ho ya Query string mein)
     // Frontend ab query mein bhejege: ?token=xyz
     const token = req.headers.authorization?.split(' ')[1] || req.query.token;
-    
+
     if (!token) {
       return res.status(401).json({ error: 'No token provided' });
     }
@@ -151,7 +151,7 @@ router.get('/:id/pdf', async (req, res) => {
     return streamPdfToResponse(test.testPdfPath, req, res);
 
   } catch (err) {
-    console.error("[Route Error] PDF Stream failed:", err);
+
     res.status(500).json({ error: "Could not retrieve PDF" });
   }
 });
@@ -189,7 +189,7 @@ router.get('/attempts/:attemptId', async (req, res) => {
 router.post('/:id/submit', async (req, res) => {
   try {
     const { userAnswers, timeTakenMinutes } = req.body;
-    
+
     const mockTest = await MockTest.findOne({ _id: req.params.id, userId: req.user._id });
     if (!mockTest) {
       console.error(`[Submission] Test not found: ${req.params.id} for user: ${req.user._id}`);
@@ -230,7 +230,7 @@ router.post('/:id/submit', async (req, res) => {
     });
 
     await attempt.save();
-    
+
     // Background Process - Pass questions for targeted analysis
     generateAndSaveFeedback(attempt._id, attempt, mockTest, req.user)
       .catch(err => console.error("Background AI Error:", err));
@@ -268,8 +268,8 @@ router.put('/:id/answer-key', async (req, res) => {
 
     await MockTest.updateOne(
       { _id: req.params.id },
-      { 
-        $set: { 
+      {
+        $set: {
           answerKey: answerKeyMap,
           answerKeyCount: answerKeyMap.size
         }
@@ -284,27 +284,27 @@ router.put('/:id/answer-key', async (req, res) => {
 
 
 router.delete('/:id', async (req, res) => {
-    try {
-        const test = await MockTest.findOne({ _id: req.params.id, userId: req.user._id });
-        if (!test) return res.status(404).json({ error: 'Test not found' });
+  try {
+    const test = await MockTest.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!test) return res.status(404).json({ error: 'Test not found' });
 
-        // 1. Uploadthing se delete (Using keys)
-        const keysToDelete = [];
-        if (test.testPdfKey) keysToDelete.push(test.testPdfKey);
-        if (test.solutionPdfKey) keysToDelete.push(test.solutionPdfKey);
+    // 1. Uploadthing se delete (Using keys)
+    const keysToDelete = [];
+    if (test.testPdfKey) keysToDelete.push(test.testPdfKey);
+    if (test.solutionPdfKey) keysToDelete.push(test.solutionPdfKey);
 
-        if (keysToDelete.length > 0) {
-            await utapi.deleteFiles(keysToDelete).catch(err => console.error("UT Delete Error:", err));
-        }
-
-        // 2. Database cleanup
-        await MockTest.findByIdAndDelete(req.params.id);
-        await TestAttempt.deleteMany({ mockTestId: req.params.id });
-
-        res.json({ success: true, message: "Deleted from Cloud and DB" });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+    if (keysToDelete.length > 0) {
+      await utapi.deleteFiles(keysToDelete).catch(err => console.error("UT Delete Error:", err));
     }
+
+    // 2. Database cleanup
+    await MockTest.findByIdAndDelete(req.params.id);
+    await TestAttempt.deleteMany({ mockTestId: req.params.id });
+
+    res.json({ success: true, message: "Deleted from Cloud and DB" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 
@@ -312,29 +312,29 @@ router.delete('/:id', async (req, res) => {
 async function processTestAndAnswerKey(mockTestId, testPdfPath, solutionPdfPath, totalQ) {
   try {
     // --- STEP 1: Process Test Paper - Crop Questions into Images FIRST (before upload deletes the file) ---
-    console.log("[Visual] Starting question image processing...");
-    const questionsData = await processTestPaperImages(testPdfPath, totalQ);
-    console.log(`[Visual] Processed ${questionsData.length} question images`);
-    
+    // console.log("[Visual] Starting question image processing...");
+    const questionsData = await processTestPaperImages(testPdfPath, totalQ, mockTestId);
+    // console.log(`[Visual] Processed ${questionsData.length} question images`);
+
     // --- STEP 2: Upload Test PDF to Cloud ---
     const testUpload = await uploadFileToUploadthing(testPdfPath, false); // false = don't delete yet
     const testCloudUrl = testUpload?.url;
     console.log(`[Visual] Test PDF upload:`, testUpload ? 'success' : 'FAILED');
-    
+
     if (!testCloudUrl) {
       throw new Error("Test PDF upload failed");
     }
-    
+
     // --- STEP 3: Extract Answer Key from Solution PDF (AI-based) ---
     console.log("[Visual] Extracting answer key...");
     const { regexParsed, answerKeySection } = await extractAnswerKeyFromSolutionPdf(solutionPdfPath);
     const finalKey = await aiService.parseAnswerKeyFromText({ answerKeySection, regexParsed, totalQuestions: totalQ });
-    
+
     // --- STEP 4: Map answers to questions ---
     const keyEntries = Object.entries(finalKey).filter(([k, v]) => !isNaN(parseInt(k)));
     const answerKeyMap = new Map(keyEntries.map(([k, v]) => [String(k), String(v).toUpperCase()]));
-    
-    // Update questions with correct answers (keep original text, add correctAnswer)
+
+    // Update questions with correct answers
     const updatedQuestions = questionsData.map(q => {
       const correctAnswer = answerKeyMap.get(String(q.questionNumber)) || null;
       return {
@@ -342,7 +342,7 @@ async function processTestAndAnswerKey(mockTestId, testPdfPath, solutionPdfPath,
         correctAnswer: correctAnswer
       };
     });
-    
+
     // --- STEP 5: Save to Database ---
     await MockTest.findByIdAndUpdate(mockTestId, {
       testPdfPath: testCloudUrl,
@@ -353,24 +353,24 @@ async function processTestAndAnswerKey(mockTestId, testPdfPath, solutionPdfPath,
       status: 'ready',
       questionTextExtractionStatus: 'completed'
     });
-    
+
     // Cleanup - files may already be deleted by upload function
     if (fs.existsSync(testPdfPath)) {
-      try { fs.unlinkSync(testPdfPath); } catch (e) {}
+      try { fs.unlinkSync(testPdfPath); } catch (e) { }
     }
     if (fs.existsSync(solutionPdfPath)) {
-      try { fs.unlinkSync(solutionPdfPath); } catch (e) {}
+      try { fs.unlinkSync(solutionPdfPath); } catch (e) { }
     }
-    
+
     console.log(`[Visual] Processing complete for MockTest ${mockTestId}`);
-    
+
   } catch (err) {
     console.error("[Visual] Processing error:", err);
     if (fs.existsSync(testPdfPath)) {
-      try { fs.unlinkSync(testPdfPath); } catch (e) {}
+      try { fs.unlinkSync(testPdfPath); } catch (e) { }
     }
     if (fs.existsSync(solutionPdfPath)) {
-      try { fs.unlinkSync(solutionPdfPath); } catch (e) {}
+      try { fs.unlinkSync(solutionPdfPath); } catch (e) { }
     }
     throw err;
   }
@@ -381,32 +381,32 @@ async function processTestAndAnswerKey(mockTestId, testPdfPath, solutionPdfPath,
 async function processTestWithTextAnswerKey(mockTestId, testPdfPath, answerKeyText, totalQ) {
   try {
     // --- STEP 1: Process Test Paper - Crop Questions into Images ---
-    console.log("[Visual] Starting question image processing...");
-    const questionsData = await processTestPaperImages(testPdfPath, totalQ);
-    console.log(`[Visual] Processed ${questionsData.length} question images`);
-    
+    // console.log("[Visual] Starting question image processing...");
+    const questionsData = await processTestPaperImages(testPdfPath, totalQ, mockTestId);
+    // console.log(`[Visual] Processed ${questionsData.length} question images`);
+
     // --- STEP 2: Upload Test PDF to Cloud ---
     const testUpload = await uploadFileToUploadthing(testPdfPath, false);
     const testCloudUrl = testUpload?.url;
     console.log(`[Visual] Test PDF upload:`, testUpload ? 'success' : 'FAILED');
-    
+
     if (!testCloudUrl) {
       throw new Error("Test PDF upload failed");
     }
-    
+
     // --- STEP 3: Parse Answer Key from Raw Text (AI-based) ---
-    console.log("[Visual] Parsing answer key from text...");
-    console.log("[Visual] Raw answer key text:", answerKeyText.substring(0, 500));
-    
+    // console.log("[Visual] Parsing answer key from text...");
+    // console.log("[Visual] Raw answer key text:", answerKeyText.substring(0, 500));
+
     // Use AI service to parse the raw text answer key
-    const finalKey = await aiService.parseAnswerKeyFromText({ 
-      answerKeySection: answerKeyText, 
-      regexParsed: {}, 
-      totalQuestions: totalQ 
+    const finalKey = await aiService.parseAnswerKeyFromText({
+      answerKeySection: answerKeyText,
+      regexParsed: {},
+      totalQuestions: totalQ
     });
-    
-    console.log("[Visual] AI parsed answer key:", JSON.stringify(finalKey));
-    
+
+    // console.log("[Visual] AI parsed answer key:", JSON.stringify(finalKey));
+
     // --- STEP 4: Normalize answer keys (handle Q1, Q2, etc.) ---
     const normalizedKey = {};
     Object.entries(finalKey).forEach(([k, v]) => {
@@ -416,15 +416,15 @@ async function processTestWithTextAnswerKey(mockTestId, testPdfPath, answerKeyTe
         normalizedKey[questionNum] = String(v).toUpperCase().replace(/[^ABCD]/g, '');
       }
     });
-    
+
     console.log("[Visual] Normalized answer key:", JSON.stringify(normalizedKey));
-    
+
     // --- STEP 5: Map answers to questions ---
     const keyEntries = Object.entries(normalizedKey).filter(([k, v]) => !isNaN(parseInt(k)));
     const answerKeyMap = new Map(keyEntries.map(([k, v]) => [String(k), v]));
-    
-    console.log(`[Visual] Final answer key map:`, Object.fromEntries(answerKeyMap));
-    
+
+    // console.log(`[Visual] Final answer key map:`, Object.fromEntries(answerKeyMap));
+
     // Update questions with correct answers
     const updatedQuestions = questionsData.map(q => {
       const correctAnswer = answerKeyMap.get(String(q.questionNumber)) || null;
@@ -436,10 +436,10 @@ async function processTestWithTextAnswerKey(mockTestId, testPdfPath, answerKeyTe
         correctAnswer: correctAnswer
       };
     });
-    
+
     const questionsWithAnswers = updatedQuestions.filter(q => q.correctAnswer).length;
-    console.log(`[Visual] Questions with answers: ${questionsWithAnswers}/${updatedQuestions.length}`);
-    
+    // console.log(`[Visual] Questions with answers: ${questionsWithAnswers}/${updatedQuestions.length}`);
+
     // --- STEP 5: Save to Database ---
     await MockTest.findByIdAndUpdate(mockTestId, {
       testPdfPath: testCloudUrl,
@@ -450,18 +450,18 @@ async function processTestWithTextAnswerKey(mockTestId, testPdfPath, answerKeyTe
       status: 'ready',
       questionTextExtractionStatus: 'completed'
     });
-    
+
     // Cleanup
     if (fs.existsSync(testPdfPath)) {
-      try { fs.unlinkSync(testPdfPath); } catch (e) {}
+      try { fs.unlinkSync(testPdfPath); } catch (e) { }
     }
-    
+
     console.log(`[Visual] Processing complete for MockTest ${mockTestId}`);
-    
+
   } catch (err) {
     console.error("[Visual] Processing error:", err);
     if (fs.existsSync(testPdfPath)) {
-      try { fs.unlinkSync(testPdfPath); } catch (e) {}
+      try { fs.unlinkSync(testPdfPath); } catch (e) { }
     }
     throw err;
   }
@@ -471,13 +471,13 @@ async function processTestWithTextAnswerKey(mockTestId, testPdfPath, answerKeyTe
 
 async function generateAndSaveFeedback(attemptId, attempt, mockTest, user) {
   try {
-    console.log(`[Arjun AI] Starting Targeted Analysis for Attempt: ${attemptId}`);
+    // console.log(`[Arjun AI] Starting Targeted Analysis for Attempt: ${attemptId}`);
 
     // --- STEP 1: Build question map from stored questions ---
     let questionMap = new Map();
     let questionTextMap = new Map();
     let questionImageMap = new Map();
-    
+
     if (mockTest.questions && Array.isArray(mockTest.questions)) {
       mockTest.questions.forEach(q => {
         questionMap.set(q.questionNumber, q);
@@ -487,22 +487,22 @@ async function generateAndSaveFeedback(attemptId, attempt, mockTest, user) {
     }
 
     const baseAnswers = Array.isArray(attempt.userAnswers) ? attempt.userAnswers : [];
-    
+
     // --- STEP 2: Identify WRONG questions ---
     const wrongQuestions = [];
     const allQuestions = baseAnswers.map(ans => {
       const qData = questionMap.get(ans.questionNumber);
       const correctAnswer = qData?.correctAnswer || ans.correctAnswer;
       const userAnswer = ans.answer;
-      const isCorrect = correctAnswer && userAnswer && 
-                       String(correctAnswer).toUpperCase() === String(userAnswer).toUpperCase();
-       
+      const isCorrect = correctAnswer && userAnswer &&
+        String(correctAnswer).toUpperCase() === String(userAnswer).toUpperCase();
+
       // Get question text, imageUrl and topic from stored questions
       const storedQ = questionTextMap.get(ans.questionNumber);
       const questionText = storedQ || `Question ${ans.questionNumber}`;
       const imageUrl = questionImageMap.get(ans.questionNumber);
       const topic = qData?.topic || qData?.subject || 'General Studies';
-       
+
       const qObj = {
         questionNumber: ans.questionNumber,
         questionText: questionText,
@@ -513,15 +513,15 @@ async function generateAndSaveFeedback(attemptId, attempt, mockTest, user) {
         correctAnswer: correctAnswer ?? 'N/A',
         isCorrect: isCorrect
       };
-       
+
       if (!isCorrect && userAnswer) {
         wrongQuestions.push(qObj);
       }
-       
+
       return qObj;
     });
 
-    console.log(`[Arjun AI] Total: ${allQuestions.length}, Wrong: ${wrongQuestions.length}`);
+    // console.log(`[Arjun AI] Total: ${allQuestions.length}, Wrong: ${wrongQuestions.length}`);
 
     // --- STEP 3: Send to AI for analysis (OCR + Groq + NVIDIA done in aiService) ---
     const analysis = await aiService.generateTargetedFeedback({
@@ -536,15 +536,15 @@ async function generateAndSaveFeedback(attemptId, attempt, mockTest, user) {
       const finalWeakAreas = Array.isArray(analysis.topicList) ? analysis.topicList : [];
       const finalDeepAnalysis = Array.isArray(analysis.deepAnalysis) ? analysis.deepAnalysis : [];
 
-      await TestAttempt.findByIdAndUpdate(attemptId, { 
+      await TestAttempt.findByIdAndUpdate(attemptId, {
         aiFeedback: analysis,
         weakAreas: finalWeakAreas,
         deepAnalysis: finalDeepAnalysis,
-        feedbackStatus: 'completed' 
+        feedbackStatus: 'completed'
       });
-      
+
       console.log(`[Arjun AI] Analysis Completed - Weak Areas: ${finalWeakAreas.length}, Deep Analysis: ${finalDeepAnalysis.length}`);
-      
+
     } else {
       console.error(`[Arjun AI] Analysis returned null for attempt: ${attemptId}`);
       await TestAttempt.findByIdAndUpdate(attemptId, { feedbackStatus: 'failed' });
@@ -553,11 +553,11 @@ async function generateAndSaveFeedback(attemptId, attempt, mockTest, user) {
   } catch (err) {
     console.error("ARJUN ENGINE CRITICAL ERROR:", err);
     console.error("Stack trace:", err.stack);
-    
+
     try {
-      await TestAttempt.findByIdAndUpdate(attemptId, { 
+      await TestAttempt.findByIdAndUpdate(attemptId, {
         feedbackStatus: 'failed',
-        processingError: err.message 
+        processingError: err.message
       });
     } catch (updateErr) {
       console.error("Failed to update attempt status:", updateErr.message);

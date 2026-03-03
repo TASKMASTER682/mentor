@@ -56,12 +56,14 @@ const REQUIRED_DAILY_BLOCKS = [
 ];
 
 const classifyRequiredBlock = (block = {}) => {
-  const text = `${block.subject || ''} ${block.topic || ''} ${block.focus || ''} ${block.taskType || ''}`.toLowerCase();
-  if (text.includes('csat')) return 'csat';
-  if (text.includes('answer writing') || text.includes('answer_writing') || block.taskType === 'answer_writing') {
+  const text = `${block.subject || ''} ${block.topic || ''} ${block.focus || ''}`.toLowerCase();
+  const type = String(block.taskType || '').toLowerCase();
+
+  if (text.includes('csat') || type === 'mcq') return 'csat';
+  if (text.includes('answer writing') || text.includes('answer_writing') || type === 'answer_writing') {
     return 'answer_writing';
   }
-  if (text.includes('fitness') || text.includes('exercise') || text.includes('meditation') || text.includes('mental')) {
+  if (text.includes('fitness') || text.includes('exercise') || text.includes('meditation') || text.includes('mental') || type === 'fitness') {
     return 'fitness';
   }
   return null;
@@ -70,15 +72,17 @@ const classifyRequiredBlock = (block = {}) => {
 export const schedulerService = {
   async generateScheduleForUser(user, options = {}) {
     try {
-      const { additionalInstruction = '', currentSchedule = null, resetRefinements = false, scheduleWindow = null } = options;
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
+      const { additionalInstruction = '', currentSchedule = null, resetRefinements = false, scheduleWindow = null, date = null } = options;
+
+      // Use provided date or today. Normalize to UTC-midnight for consistency.
+      const targetDate = date ? new Date(date) : new Date();
+      targetDate.setUTCHours(0, 0, 0, 0);
 
       const activeMissions = await Mission.find({ userId: user._id, status: 'active' }).sort({ priority: 1, deadline: 1 });
       const sources = await LibrarySource.find({ userId: user._id });
 
-      const weekAgo = new Date(today);
-      weekAgo.setDate(weekAgo.getDate() - 7);
+      const weekAgo = new Date(targetDate);
+      weekAgo.setUTCDate(weekAgo.getUTCDate() - 7);
       const recentEntries = await DailyTracker.find({ userId: user._id, date: { $gte: weekAgo } });
       const subjectCompletionMap = {};
       recentEntries.forEach(entry => {
@@ -171,9 +175,13 @@ export const schedulerService = {
         const windowMinutes = window.end - window.start;
         if (windowMinutes <= 0) return inputBlocks;
 
+        const missionSubjects = new Set(activeMissions.map(m => m.subject.toLowerCase()));
+
         const totals = { fitness: 0, csat: 0, answer_writing: 0 };
         const existingMandatory = [];
-        const optional = [];
+        const missionBlocks = [];
+        const otherBlocks = [];
+        const coveredMissionSubjects = new Set();
 
         inputBlocks.forEach((block) => {
           const category = classifyRequiredBlock(block);
@@ -181,22 +189,49 @@ export const schedulerService = {
           const plannedDuration = Number(block?.plannedDurationMinutes) || 0;
           const duration = plannedDuration > 0 ? plannedDuration : (parsedDuration > 0 ? parsedDuration : 60);
 
+          const subjectLower = String(block.subject || '').toLowerCase();
+          const matchesMission = missionSubjects.has(subjectLower);
+
           if (category) {
             totals[category] += duration;
             existingMandatory.push(block);
+          } else if (matchesMission) {
+            missionBlocks.push(block);
           } else {
-            optional.push(block);
+            otherBlocks.push(block);
+          }
+
+          if (matchesMission) {
+            coveredMissionSubjects.add(subjectLower);
           }
         });
+
+        const missingMissionBlocks = activeMissions
+          .filter(m => !coveredMissionSubjects.has(m.subject.toLowerCase()))
+          .map(m => {
+            coveredMissionSubjects.add(m.subject.toLowerCase()); // Avoid duplicates in same loop
+            return {
+              subject: m.subject,
+              topic: m.title,
+              focus: "Mission Study Block",
+              taskType: 'learning',
+              priority: 1,
+              plannedDurationMinutes: Math.max(60, Math.round((m.dailyHoursRequired || 2) * 60 / 2))
+            };
+          });
 
         const requiredTotal = REQUIRED_DAILY_BLOCKS.reduce((sum, r) => sum + r.requiredMinutes, 0);
         const scale = windowMinutes < requiredTotal ? windowMinutes / requiredTotal : 1;
 
-        const missingBlocks = REQUIRED_DAILY_BLOCKS
+        const missingMandatoryBlocks = REQUIRED_DAILY_BLOCKS
           .map((req) => {
             const target = Math.max(20, Math.round(req.requiredMinutes * scale));
             const missing = Math.max(0, target - (totals[req.key] || 0));
             if (missing <= 0) return null;
+
+            // Check if any mission can swallow this mandatory task
+            // e.g. if we need "answer_writing" and have a mission for "Polity", we could label the block.
+            // But for now, we just add the block. 
             return {
               subject: req.subject,
               topic: req.topic,
@@ -207,40 +242,11 @@ export const schedulerService = {
           })
           .filter(Boolean);
 
-        // Create a priority map for missions
-        const missionSubjects = new Set(activeMissions.map(m => m.subject));
-
-        // Categorize optional blocks into Mission and Non-Mission
-        const missionBlocks = [];
-        const otherBlocks = [];
-
-        optional.forEach(block => {
-          if (missionSubjects.has(block.subject)) {
-            missionBlocks.push(block);
-          } else {
-            otherBlocks.push(block);
-          }
-        });
-
-        // ENFORCE MISSIONS: Ensure every mission subject has at least one block
-        const coveredMissionSubjects = new Set([...missionBlocks, ...existingMandatory].map(b => b.subject));
-        const missingMissionBlocks = activeMissions
-          .filter(m => !coveredMissionSubjects.has(m.subject))
-          .map(m => ({
-            subject: m.subject,
-            topic: m.title,
-            focus: "Mission Study Block",
-            taskType: 'learning',
-            priority: 1,
-            plannedDurationMinutes: Math.max(60, Math.round((m.dailyHoursRequired || 2) * 60 / 2)) // Add a placeholder block
-          }));
-
-        // Interleave missing mandatory and missing mission blocks
         return [
           ...existingMandatory,
           ...missionBlocks,
           ...missingMissionBlocks,
-          ...missingBlocks,
+          ...missingMandatoryBlocks,
           ...otherBlocks
         ];
       };
@@ -271,7 +277,7 @@ export const schedulerService = {
             topic: block.topic || block.focus || 'Targeted study block',
             taskType,
             priority: mappedPriority,
-            date: today.toISOString().slice(0, 10),
+            date: targetDate.toISOString().slice(0, 10),
             missionId: mission?._id,
             duration: this.calculateDuration(block.startTime, block.endTime)
           };
@@ -291,7 +297,7 @@ export const schedulerService = {
 
       const updatePayload = {
         userId: user._id,
-        date: today,
+        date: targetDate,
         blocks: scheduledBlocks,
         totalPlannedHours,
         activeMissions: activeMissions.map(m => m._id),
@@ -303,7 +309,7 @@ export const schedulerService = {
       }
 
       const schedule = await Schedule.findOneAndUpdate(
-        { userId: user._id, date: today },
+        { userId: user._id, date: targetDate },
         updatePayload,
         { upsert: true, returnDocument: 'after' }
       );
@@ -325,18 +331,18 @@ export const schedulerService = {
     return (eh * 60 + em) - (sh * 60 + sm);
   },
 
-  async refineTodayScheduleForUser(user, instruction) {
+  async refineTodayScheduleForUser(user, instruction, date = null) {
     const cleanedInstruction = String(instruction || '').trim();
     if (!cleanedInstruction) {
       throw new Error('Instruction is required');
     }
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const targetDate = date ? new Date(date) : new Date();
+    targetDate.setUTCHours(0, 0, 0, 0);
 
-    let schedule = await Schedule.findOne({ userId: user._id, date: today });
+    let schedule = await Schedule.findOne({ userId: user._id, date: targetDate });
     if (!schedule) {
-      schedule = await this.generateScheduleForUser(user, { resetRefinements: true });
+      schedule = await this.generateScheduleForUser(user, { resetRefinements: true, date: targetDate });
     }
 
     const currentCount = Number(schedule.refinementCount) || 0;

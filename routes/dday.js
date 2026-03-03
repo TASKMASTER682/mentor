@@ -8,7 +8,7 @@ router.use(authenticate);
 const normalizeDateOnly = (raw) => {
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) return null;
-  d.setHours(0, 0, 0, 0);
+  d.setUTCHours(0, 0, 0, 0);
   return d;
 };
 
