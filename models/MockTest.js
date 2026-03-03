@@ -8,7 +8,7 @@ const mockTestSchema = new mongoose.Schema({
   totalQuestions:  { type: Number, default: 100 },
   durationMinutes: { type: Number, default: 120 },
   testPdfPath:     { type: String, required: true },   // streamed to iframe
-  solutionPdfPath: { type: String, required: true },   // used only during processing
+  solutionPdfPath: { type: String, default: null },   // no longer needed after answer key extraction
   testPdfName:     { type: String },
   solutionPdfName: { type: String },
   subject: { type: String, required: true }, // e.g., "Polity", "History"
@@ -27,12 +27,28 @@ const mockTestSchema = new mongoose.Schema({
   processingError: { type: String, default: null },
   answerKeyCount:  { type: Number, default: 0 },
   
-  // NEW: Store extracted question text for AI analysis
+  // NEW: Visual-Spatial Questions Storage (Spatial-First Architecture)
   questions: [{
     questionNumber: { type: Number, required: true },
     text: { type: String, default: "Text not available." },
-    subject: { type: String, default: "General Studies" }
+    subject: { type: String, default: "General Studies" },
+    topic: { type: String, default: null },
+    imageUrl: { type: String, default: null },
+    imageHash: { type: String, default: null }, // For deduplication
+    boundingBox: {
+      page: { type: Number, default: 1 },
+      x1: { type: Number, default: 0 },
+      y1: { type: Number, default: 0 },
+      x2: { type: Number, default: 0 },
+      y2: { type: Number, default: 0 }
+    },
+    correctAnswer: { type: String, enum: ['A', 'B', 'C', 'D', null], default: null },
+    status: { type: String, enum: ['active', 'archived'], default: 'active' }
   }],
+  
+  // Answer Key Caching
+  answerKeyCacheHash: { type: String, default: null }, // Hash of answer key image for cache lookup
+  answerKeyCached: { type: Boolean, default: false },
   questionTextExtractionStatus: {
     type: String,
     enum: ['pending', 'completed', 'failed'],

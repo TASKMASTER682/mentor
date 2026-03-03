@@ -4,9 +4,13 @@ const userAnswerSchema = new mongoose.Schema({
   answer: { type: String, enum: ['A', 'B', 'C', 'D', null], default: null }, 
   isCorrect: { type: Boolean, default: false },
   marksAwarded: { type: Number, default: 0 },
-  correctAnswer: { type: String }, // Direct access for result UI
-  subject: { type: String, default: 'General Studies' }, // AI tagging ke liye
-  topic: { type: String }, // Micro-analysis ke liye
+  correctAnswer: { type: String },
+  subject: { type: String, default: 'General Studies' },
+  topic: { type: String, default: null },
+  imageUrl: { type: String, default: null },
+  questionImageUrl: { type: String, default: null }, // Cropped question image
+  coreTopic: { type: String, default: null }, // Extracted core topic
+  mentorAdvice: { type: String, default: null }, // 2-3 line advice
 });
 const subjectBreakdownSchema = new mongoose.Schema({
   subject: { type: String, required: true },

@@ -44,7 +44,6 @@ export const uploadPDFs = multer({
   limits: { fileSize: 6 * 1024 * 1024 }, // 6 MB limit
 }).fields([
   { name: 'testPdf', maxCount: 1 },
-  { name: 'solutionPdf', maxCount: 1 },
 ]);
 
 export const uploadDir_ = uploadDir;

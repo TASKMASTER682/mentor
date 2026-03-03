@@ -114,18 +114,18 @@ export const schedulerService = {
         return normalizeWindow({ startTime: first?.startTime, endTime: last?.endTime });
       })();
       let effectiveWindow = normalizeWindow(scheduleWindow) || inferredWindow;
-if (!effectiveWindow) {
-  const now = new Date();
-  const startMinutes = (now.getHours() * 60) + now.getMinutes();
-  const roundedStart = Math.min(23 * 60, Math.ceil(startMinutes / 15) * 15);
-  const toHHMM = (mins) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
-  effectiveWindow = {
-    start: roundedStart,
-    end: 23 * 60,
-    startTime: toHHMM(roundedStart),
-    endTime: '23:00'
-  };
-}
+      if (!effectiveWindow) {
+        const now = new Date();
+        const startMinutes = (now.getHours() * 60) + now.getMinutes();
+        const roundedStart = Math.min(23 * 60, Math.ceil(startMinutes / 15) * 15);
+        const toHHMM = (mins) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+        effectiveWindow = {
+          start: roundedStart,
+          end: 23 * 60,
+          startTime: toHHMM(roundedStart),
+          endTime: '23:00'
+        };
+      }
 
       const blocks = await aiService.generateSchedule({
         user, sources, activeMissions, recentEntries,
@@ -207,7 +207,42 @@ if (!effectiveWindow) {
           })
           .filter(Boolean);
 
-        return [...existingMandatory, ...missingBlocks, ...optional];
+        // Create a priority map for missions
+        const missionSubjects = new Set(activeMissions.map(m => m.subject));
+
+        // Categorize optional blocks into Mission and Non-Mission
+        const missionBlocks = [];
+        const otherBlocks = [];
+
+        optional.forEach(block => {
+          if (missionSubjects.has(block.subject)) {
+            missionBlocks.push(block);
+          } else {
+            otherBlocks.push(block);
+          }
+        });
+
+        // ENFORCE MISSIONS: Ensure every mission subject has at least one block
+        const coveredMissionSubjects = new Set([...missionBlocks, ...existingMandatory].map(b => b.subject));
+        const missingMissionBlocks = activeMissions
+          .filter(m => !coveredMissionSubjects.has(m.subject))
+          .map(m => ({
+            subject: m.subject,
+            topic: m.title,
+            focus: "Mission Study Block",
+            taskType: 'learning',
+            priority: 1,
+            plannedDurationMinutes: Math.max(60, Math.round((m.dailyHoursRequired || 2) * 60 / 2)) // Add a placeholder block
+          }));
+
+        // Interleave missing mandatory and missing mission blocks
+        return [
+          ...existingMandatory,
+          ...missionBlocks,
+          ...missingMissionBlocks,
+          ...missingBlocks,
+          ...otherBlocks
+        ];
       };
 
       const sourceBlocks = Array.isArray(blocks) ? blocks : [];
