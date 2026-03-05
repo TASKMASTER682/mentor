@@ -132,8 +132,22 @@ export const schedulerService = {
       }
 
       const targetDateStr = targetDate.toISOString().slice(0, 10);
+      
+      const prunedUser = {
+        _id: user._id?.toString?.() || user._id,
+        name: user.name
+      };
+
+      console.log('[Scheduler] Calling AI with:', {
+        hasUser: !!prunedUser,
+        activeMissionsCount: activeMissions.length,
+        sourcesCount: sources.length,
+        recentEntriesCount: recentEntries.length,
+        window: effectiveWindow
+      });
+      
       const blocks = await aiService.generateSchedule({
-        user, sources, activeMissions, recentEntries,
+        user: prunedUser, sources, activeMissions, recentEntries,
         avoidedSubjects: allWeakSubjects,
         additionalInstruction,
         currentScheduleBlocks: Array.isArray(currentSchedule?.blocks) ? currentSchedule.blocks : [],

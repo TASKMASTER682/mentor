@@ -46,6 +46,20 @@ app.use('/api/d-day', ddayRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date() }));
 
+// Global Error Handler
+app.use((err, req, res, next) => {
+  console.error('SERVER ERROR:', {
+    message: err.message,
+    stack: err.stack,
+    path: req.path,
+    method: req.method
+  });
+  res.status(err.status || 500).json({
+    error: err.message || 'Internal Server Error',
+    path: req.path
+  });
+});
+
 io.on('connection', (socket) => {
   socket.on('join_room', (userId) => socket.join(userId));
 });

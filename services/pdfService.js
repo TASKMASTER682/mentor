@@ -578,6 +578,8 @@ export async function streamPdfToResponse(filePathOrUrl, req, res) {
     }
 }
 
+import { formatQuestionTextToHTML } from '../utils/parser.js';
+
 export async function extractAndStoreQuestionText(mockTestId, testPdfUrl) {
     try {
         console.log(`[Question Text Extraction] Starting for MockTest ${mockTestId}`);
@@ -585,15 +587,19 @@ export async function extractAndStoreQuestionText(mockTestId, testPdfUrl) {
         const textMap = await extractUPSCVisualMap(testPdfUrl);
 
         if (textMap && Object.keys(textMap).length > 0) {
+            const formattedQuestions = await Promise.all(
+                Object.entries(textMap).map(async ([qNo, text]) => ({
+                    questionNumber: parseInt(qNo),
+                    text: await formatQuestionTextToHTML(text.replace(/[ \t]+/g, ' ')),
+                    subject: "General Studies"
+                }))
+            );
+
             await MockTest.updateOne(
                 { _id: mockTestId },
                 {
                     $set: {
-                        questions: Object.entries(textMap).map(([qNo, text]) => ({
-                            questionNumber: parseInt(qNo),
-                            text: text,
-                            subject: "General Studies"
-                        })),
+                        questions: formattedQuestions,
                         questionTextExtractionStatus: 'completed'
                     }
                 }

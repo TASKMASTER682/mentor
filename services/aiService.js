@@ -235,6 +235,8 @@ INSTRUCTIONS:
 - If a mission's todayPlan involves writing or practice, set taskType to 'answer_writing' or 'mcq'.
 - Ensure "Answer Writing" (1h) and "Fitness" (1h) are covered. If a mission handles Answer Writing, just add the rest of the mandatory tasks (Fitness/CSAT).`;
 
+      // console.log('[AI Schedule] Prompt length:', prompt.length, '| Missions:', prunedMissions.length);
+
       const response = await getOpenAIClient().chat.completions.create({
         model: 'yentinglin/llama-3-taiwan-70b-instruct',
         messages: [
@@ -248,16 +250,38 @@ INSTRUCTIONS:
       const match = text.match(/\[[\s\S]*\]/);
       return match ? JSON.parse(match[0]) : [];
     } catch (err) {
-      console.error('Schedule Error:', err);
-      return [];
+      console.error('[AI Schedule] NVIDIA API failed, trying Groq:', err.response?.data?.error?.message || err.message);
+      
+      try {
+        const groqResponse = await getGroqClient().chat.completions.create({
+          model: 'llama-3.3-70b-versatile',
+          messages: [
+            { role: 'system', content: SCHEDULER_SYSTEM_PROMPT },
+            { role: 'user', content: prompt }
+          ],
+          max_tokens: 2000,
+          temperature: 0.3
+        });
+        const text = groqResponse.choices[0].message.content.trim();
+        const match = text.match(/\[[\s\S]*\]/);
+        return match ? JSON.parse(match[0]) : [];
+      } catch (groqErr) {
+        console.error('[AI Schedule] Groq also failed:', groqErr.message);
+        return [];
+      }
     }
   },
 
   async generateTestPerformanceReview({ user, attempt, mockTest, questionBank }) {
     try {
       const wrongQuestions = questionBank.filter(q => !q.isCorrect);
+      const correctQuestions = questionBank.filter(q => q.isCorrect === true);
+      const unattemptedQuestions = questionBank.filter(q => q.isCorrect === null || q.isCorrect === undefined || q.isCorrect === 'unattempted');
+      
       const validForCrux = wrongQuestions.slice(0, 15);
+      const validForStrengths = correctQuestions.slice(0, 15);
       const cruxes = await getQuestionsCrux(validForCrux);
+      const strengthCruxes = await getQuestionsCrux(validForStrengths);
 
       const accuracyRate = ((attempt.correctCount / (attempt.correctCount + (attempt.wrongCount || 0) || 1)) * 100).toFixed(1);
       const totalAccuracy = ((attempt.correctCount / (mockTest.totalQuestions || 100)) * 100).toFixed(1);
@@ -272,11 +296,18 @@ INSTRUCTIONS:
         wrong: attempt.wrongCount,
         skipped: attempt.unattemptedCount,
         totalQuestions: mockTest.totalQuestions || 100,
+        attempted: (attempt.correctCount || 0) + (attempt.wrongCount || 0),
         wrongSample: validForCrux.map((item, i) => ({
           qNo: item.questionNumber,
           crux: cruxes[i] || item.topic,
           topic: item.topic || 'General Studies'
-        }))
+        })),
+        strengthSample: validForStrengths.map((item, i) => ({
+          qNo: item.questionNumber,
+          crux: strengthCruxes[i] || item.topic,
+          topic: item.topic || 'General Studies'
+        })),
+        unattemptedCount: unattemptedQuestions.length
       };
 
       const systemPrompt = `You are ARJUN, a high-performance UPSC Mentor. 
@@ -287,7 +318,7 @@ For example Instead of "Polity", identify the exact sub-topic like "Governor's P
 Return ONLY JSON:
 { 
   "headline": "[Accuracy]% Strike Rate - [Direct Mentorship Message to 'You']",
-  "summary": { "strengths": ["Granular Sub-Topic (e.g., Pre-Mauryan Age)"], "studyRecommendations": "Directed advice for 'You' naming specific books" },
+  "summary": { "strengths": ["Granular Sub-Topic from CORRECT questions (e.g., Pre-Mauryan Age)"], "studyRecommendations": "Directed advice for 'You' naming specific books" },
   "topicList": ["Granular Sub-Topic (e.g., GDP vs GVA)"], 
   "strategy": ["Immediate action for 'You'"], 
   "deepAnalysis": [{"qNo": number, "topic": "Granular Sub-Topic", "questionText": "Concept Crux", "analysis": "Speak to 'You'. Explain the concept and what 'You' must read."}] 
@@ -295,8 +326,10 @@ Return ONLY JSON:
 
 REQUIREMENTS:
 1. Headline must contain the Strike Rate (Correct/Attempted).
-2. All topics MUST be granular sub-topics (e.g., "Sixth Schedule" NOT "Polity").
-3. Analysis must address the user directly: "You confused X with Y. You must read Spectrum Chapter 5 for this."`;
+2. STRENGTHS: Find strengths from the "strengthSample" array (questions user got RIGHT). These are topics user knows well.
+3. WEAK AREAS: Find weak areas from the "wrongSample" array (questions user got WRONG) and "unattemptedCount" (questions not attempted).
+4. All topics MUST be granular sub-topics (e.g., "Sixth Schedule" NOT "Polity").
+5. Analysis must address the user directly: "You confused X with Y. You must read Spectrum Chapter 5 for this."`;
 
       const response = await getOpenAIClient().chat.completions.create({
         model: 'yentinglin/llama-3-taiwan-70b-instruct',
@@ -344,7 +377,7 @@ REQUIREMENTS:
       const subset = (wrongQuestions || []).slice(0, maxToAnalyze);
       const deepAnalysis = [];
 
-      console.log(`[Arjun AI] Analyzing ${subset.length} wrong questions...`);
+      // console.log(`[Arjun AI] Analyzing ${subset.length} wrong questions...`);
 
       for (const wq of subset) {
         try {
@@ -417,6 +450,106 @@ All values must be plain strings.`
       };
     } catch (err) {
       console.error('Targeted Feedback Critical Error:', err);
+      return null;
+    }
+  },
+
+  async intelligentParseExam({ questionText, solutionText, subject }) {
+    try {
+      const response = await getGroqClient().chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          {
+            role: 'system',
+            content: `You are an expert UPSC Exam Parser. 
+            Analyze the provided raw question paper text and solution/explanation text carefully.
+            
+            GOAL: Extract a perfectly structured question bank.
+            
+            INSTRUCTIONS:
+            1. OBJECT MAPPING: Every question must be correctly paired with its corresponding solution using the question number.
+            2. CLEANING: 
+               - Remove headers, footers, page numbers.
+               - Strip watermarks or noise like "100%, 75%".
+               - Fix OCR artifacts (e.g., "0" instead of "D" if it's an option).
+            3. FORMATTING: 
+               - Preserve mathematical notations, indented lists, or quotes within questionText.
+               - Ensure options (a, b, c, d) are cleanly separated.
+            4. CORRECTNESS: 
+               - The "correctAnswer" must be EXACTLY one of: "A", "B", "C", "D".
+               - The "explanation" must be comprehensive, including any factual references or logic provided in the solution text.
+            5. HANDLING EDGE CASES:
+               - If a question has more than 4 options, try to merge the extra into the question text or ignore.
+               - If no explicit "Ans)" marker exists, deduce the answer from the explanation context.
+            
+            OUTPUT SCHEMA (Strictly JSON Array of Objects):
+            [
+              {
+                "questionNumber": number,
+                "question": "Full multi-line question text here",
+                "options": {
+                  "a": "text for option a",
+                  "b": "text for option b",
+                  "c": "text for option c",
+                  "d": "text for option d"
+                },
+                "correctAnswer": "A",
+                "solution": "Full detailed explanation text here"
+              }
+            ]`
+
+          },
+          {
+            role: 'user',
+            content: `SUBJECT: ${subject}\n\nQUESTION PAPER TEXT:\n${questionText}\n\nSOLUTION/ANSWER KEY TEXT:\n${solutionText}`
+          }
+        ],
+        response_format: { type: "json_object" },
+        max_tokens: 8000,
+        temperature: 0.1
+      });
+
+      const text = response.choices[0].message.content.trim();
+      const parsed = tryParseJSON(text);
+
+      // The AI might return { "questions": [...] } or just the array
+      if (parsed && Array.isArray(parsed)) return parsed;
+      if (parsed && parsed.questions && Array.isArray(parsed.questions)) return parsed.questions;
+
+      return null;
+    } catch (err) {
+      console.error('Intelligent Parse Error:', err);
+      return null;
+    }
+  },
+
+  async formatTableQuestion(questionText) {
+    try {
+      const response = await getGroqClient().chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
+        messages: [{
+          role: 'system',
+          content: `You are an expert UPSC parser. The user will provide a match-the-column or pairs-based question.
+Your goal is to reformat ONLY the tabular or paired data part into a perfect HTML table.
+Return the ENTIRE question text, with the list/pairs perfectly formatted into an HTML <table>.
+Maintain all text outside the table as standard HTML paragraphs <p>.
+Add sleek styling to your table and cells using Tailwind classes similar to "border border-ink-800 text-sm text-left p-3". Make it look beautiful and readable in a dark mode UI.
+Do not wrap your output in markdown code blocks (\`\`\`html) - return ONLY the raw HTML string.`
+        }, {
+          role: 'user',
+          content: questionText
+        }],
+        temperature: 0.1
+      });
+      let html = response.choices[0].message.content.trim();
+      if (html.startsWith('```html')) {
+        html = html.replace(/^```html|```$/g, '').trim();
+      } else if (html.startsWith('```')) {
+        html = html.replace(/^```|```$/g, '').trim();
+      }
+      return html;
+    } catch (err) {
+      console.error('AI Table Formatting Error:', err);
       return null;
     }
   }

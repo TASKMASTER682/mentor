@@ -16,6 +16,9 @@ import {
 import { aiService } from '../services/aiService.js';
 import { calculateScore } from '../services/scoringService.js';
 import { UTApi } from "uploadthing/server";
+import Question from '../models/Question.js';
+import { parseQuestions, parseSolutions, mapQuestionsAndSolutions, extractAnswersRegex } from '../utils/parser.js';
+
 
 const utapi = new UTApi();
 
@@ -35,7 +38,15 @@ const unlinkIfExists = async (filePath) => {
 };
 router.get('/', async (req, res) => {
   try {
-    const tests = await MockTest.find({ userId: req.user._id })
+    const { subject, year, testType, mode } = req.query;
+    const filter = { userId: req.user._id };
+
+    if (subject) filter.subject = subject;
+    if (year) filter.year = parseInt(year);
+    if (testType) filter.testType = testType;
+    if (mode) filter.mode = mode;
+
+    const tests = await MockTest.find(filter)
       .select('-answerKey')
       .sort({ createdAt: -1 });
     res.json(tests);
@@ -43,6 +54,22 @@ router.get('/', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Get unique subjects and years for filtering
+router.get('/metadata/filters', async (req, res) => {
+  try {
+    const subjects = await MockTest.distinct('subject', { userId: req.user._id });
+    const years = await MockTest.distinct('year', { userId: req.user._id });
+
+    res.json({
+      subjects: subjects.filter(Boolean).sort(),
+      years: years.filter(Boolean).sort((a, b) => b - a)
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get('/attempts/all/list', async (req, res) => {
   try {
     const limit = Number(req.query.limit);
@@ -89,6 +116,7 @@ router.post('/upload', uploadPDFs, async (req, res) => {
       name: req.body.name?.trim() || testFile.originalname.replace(/\.pdf$/i, ''),
       testType: req.body.testType || 'prelims_gs',
       subject: req.body.subject,
+      year: req.body.year ? parseInt(req.body.year) : null,
       topics: topicsArray,
       totalQuestions: totalQ,
       durationMinutes: parseInt(req.body.durationMinutes) || 120,
@@ -103,8 +131,8 @@ router.post('/upload', uploadPDFs, async (req, res) => {
 
     await mockTest.save();
 
-    // 3. Visual Processing: Crop questions and parse answer key from text
-    processTestWithTextAnswerKey(mockTest._id, testFile.path, answerKeyText, totalQ).catch(async (err) => {
+    // 3. Simplified Processing for Fallback Mode (No OCR, No AI)
+    processPdfWithoutAI(mockTest._id, testFile.path, answerKeyText, totalQ).catch(async (err) => {
       console.error(`[MockTest ${mockTest._id}] Processing Error:`, err.message);
       await MockTest.findByIdAndUpdate(mockTest._id, {
         status: 'error',
@@ -128,33 +156,171 @@ router.post('/upload', uploadPDFs, async (req, res) => {
   }
 });
 
-router.get('/:id/pdf', async (req, res) => {
+router.post('/upload-structured', async (req, res) => {
+  const t0 = Date.now();
   try {
-    // 1. Auth Check (Token Header mein ho ya Query string mein)
-    // Frontend ab query mein bhejege: ?token=xyz
-    const token = req.headers.authorization?.split(' ')[1] || req.query.token;
+    const {
+      name, subject, testType, totalQuestions, durationMinutes,
+      markCorrect, markWrong, questionPaperText, solutionText, testSeriesId, year
+    } = req.body;
 
-    if (!token) {
-      return res.status(401).json({ error: 'No token provided' });
+    if (!questionPaperText || !solutionText) {
+      return res.status(400).json({ error: "Question paper and solution text are required" });
     }
 
-    // Yahan aap apna manual JWT verify logic bhi daal sakte hain agar middleware bypass ho raha ho
-    // Maan lete hain req.user._id mil raha hai (warna query se verify karein)
+    // 1. Local pattern-based parsing (zero AI calls, instant)
+    console.log(`[Structured Upload] Starting Local Parsing for ${subject}...`);
+    const parsedQuestions = await parseQuestions(questionPaperText);
+    const parsedSolutions = parseSolutions(solutionText);
+    let mappedData = mapQuestionsAndSolutions(parsedQuestions, parsedSolutions);
+    // console.log(`[Structured Upload] Parser found ${mappedData.length} questions in ${Date.now() - t0}ms`);
 
-    const test = await MockTest.findById(req.params.id).select('testPdfPath');
+    if (!mappedData || mappedData.length === 0) {
+      return res.status(400).json({ error: "No questions could be parsed. Please check the format (Q.1) ... a) b) c) d))" });
+    }
 
+    // Log a sample
+    // console.log("[Structured Upload] Sample Q1:", JSON.stringify(mappedData[0], null, 2));
+
+    // 2. Validate & normalize all questions
+    const validQuestions = [];
+    for (const qData of mappedData) {
+      const qText = (qData.questionText || qData.question || '').trim();
+      const qNum = qData.questionNumber;
+      const qOpts = qData.options;
+      const qCorrect = String(qData.correctAnswer || '').toUpperCase().trim();
+
+      if (!qText || !qOpts || !qNum) {
+        console.warn(`[Structured Upload] Skipping Q${qNum || '?'} — missing text/options`);
+        continue;
+      }
+      if (!['A', 'B', 'C', 'D'].includes(qCorrect)) {
+        console.warn(`[Structured Upload] Skipping Q${qNum} — invalid answer "${qCorrect}"`);
+        continue;
+      }
+
+      validQuestions.push({
+        questionNumber: qNum,
+        text: qText,
+        options: {
+          a: qOpts.a || 'Option A',
+          b: qOpts.b || 'Option B',
+          c: qOpts.c || 'Option C',
+          d: qOpts.d || 'Option D',
+        },
+        correctAnswer: qCorrect,
+        explanation: (qData.explanation || qData.solution || '').trim(),
+        subject: subject || 'General Studies',
+        year: year || new Date().getFullYear()
+      });
+    }
+
+    if (validQuestions.length === 0) {
+      return res.status(400).json({ error: "No valid questions with correct answers were found." });
+    }
+
+    // 3. BULK UPSERT — single MongoDB call instead of N sequential calls
+    const t1 = Date.now();
+    const bulkOps = validQuestions.map(q => ({
+      updateOne: {
+        filter: { text: q.text },           // find by exact text (dedup)
+        update: {
+          $setOnInsert: {           // only insert if new
+            questionNumber: q.questionNumber,
+            text: q.text,
+            options: q.options,
+            correctAnswer: q.correctAnswer,
+            explanation: q.explanation,
+            subject: q.subject,
+            year: q.year
+          }
+        },
+        upsert: true
+      }
+    }));
+
+    const bulkResult = await Question.bulkWrite(bulkOps, { ordered: false });
+    // console.log(`[Structured Upload] bulkWrite done in ${Date.now() - t1}ms — inserted: ${bulkResult.upsertedCount}, existing: ${bulkResult.matchedCount}`);
+
+    // 4. Fetch the IDs (both new and existing)
+    const questionTexts = validQuestions.map(q => q.text);
+    const savedQuestions = await Question.find({ text: { $in: questionTexts } }).select('_id text questionNumber');
+
+    // Build answer key map
+    const textToQ = new Map(validQuestions.map(q => [q.text, q]));
+    const questionIds = [];
+    const answerKeyMap = new Map();
+
+    for (const savedQ of savedQuestions) {
+      const original = textToQ.get(savedQ.text);
+      if (original) {
+        questionIds.push(savedQ._id);
+        answerKeyMap.set(String(original.questionNumber), original.correctAnswer);
+      }
+    }
+
+    // 5. Create MockTest record
+    const mockTest = new MockTest({
+      userId: req.user._id,
+      testSeriesId: testSeriesId || null,
+      name: name || "Structured Test",
+      testType: testType || 'prelims_gs',
+      subject,
+      year,
+      totalQuestions: totalQuestions || validQuestions.length,
+      durationMinutes: durationMinutes || 120,
+      markCorrect: markCorrect || 2.0,
+      markWrong: markWrong || -0.66,
+      mode: 'structured',
+      structuredQuestions: questionIds,
+      answerKey: answerKeyMap,
+      answerKeyCount: answerKeyMap.size,
+      status: 'ready',
+      questionTextExtractionStatus: 'completed',
+      testPdfPath: "NOT_APPLICABLE"
+    });
+
+    await mockTest.save();
+
+    console.log(`[Structured Upload] DONE — ${validQuestions.length} questions, total time: ${Date.now() - t0}ms`);
+
+    res.status(201).json({
+      mockTestId: mockTest._id,
+      status: 'ready',
+      name: mockTest.name,
+      questionCount: validQuestions.length
+    });
+
+  } catch (err) {
+    console.error("Structured Upload Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+router.get('/:id/pdf', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1] || req.query.token;
+    if (!token) return res.status(401).json({ error: 'No token provided' });
+
+    const test = await MockTest.findById(req.params.id).select('testPdfPath mode');
     if (!test || !test.testPdfPath) {
       return res.status(404).json({ error: 'Test PDF not found' });
     }
 
-    // Call our smart service
+    // Structured mode tests have no PDF
+    if (test.testPdfPath === 'NOT_APPLICABLE' || test.mode === 'structured') {
+      return res.status(404).json({ error: 'No PDF — this is a structured question bank test. Questions are loaded directly.' });
+    }
+
     return streamPdfToResponse(test.testPdfPath, req, res);
 
   } catch (err) {
-
     res.status(500).json({ error: "Could not retrieve PDF" });
   }
 });
+
 
 
 router.get('/:id/status', async (req, res) => {
@@ -177,7 +343,7 @@ router.get('/:id/status', async (req, res) => {
 router.get('/attempts/:attemptId', async (req, res) => {
   try {
     const attempt = await TestAttempt.findOne({ _id: req.params.attemptId, userId: req.user._id })
-      .populate('mockTestId', 'name testType totalQuestions markCorrect markWrong');
+      .populate('mockTestId', 'name testType totalQuestions markCorrect markWrong mode');
     if (!attempt) return res.status(404).json({ error: 'Attempt not found' });
     res.json(attempt);
   } catch (err) {
@@ -202,9 +368,17 @@ router.post('/:id/submit', async (req, res) => {
       UNATTEMPTED: Number(mockTest.markUnattempted) || 0,
     };
 
-    // Build question map - no imageUrl needed for AI analysis
+    // Build question map
     const questionTextMap = new Map();
-    if (mockTest.questions) {
+    const explanationMap = new Map();
+
+    if (mockTest.mode === 'structured') {
+      const populatedTest = await MockTest.findById(mockTest._id).populate('structuredQuestions');
+      populatedTest.structuredQuestions.forEach(q => {
+        questionTextMap.set(q.questionNumber, q.text);
+        explanationMap.set(q.questionNumber, q.explanation);
+      });
+    } else if (mockTest.questions) {
       mockTest.questions.forEach(q => {
         questionTextMap.set(q.questionNumber, q.text);
       });
@@ -212,12 +386,19 @@ router.post('/:id/submit', async (req, res) => {
 
     const result = calculateScore(userAnswers, mockTest.answerKey, markingScheme);
 
+    // Enrich results with text and explanations
+    const enrichedUserAnswers = result.userAnswers.map(ans => ({
+      ...ans,
+      questionText: questionTextMap.get(ans.questionNumber) || "",
+      explanation: explanationMap.get(ans.questionNumber) || ""
+    }));
+
     // No need to enrich with imageUrls
     const attempt = new TestAttempt({
       userId: req.user._id,
       mockTestId: mockTest._id,
       testName: mockTest.name,
-      userAnswers: result.userAnswers,
+      userAnswers: enrichedUserAnswers,
       score: result.score,
       maxScore: result.maxScore || 0,
       percentage: result.percentage || 0,
@@ -249,13 +430,17 @@ router.post('/:id/submit', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const test = await MockTest.findOne({ _id: req.params.id, userId: req.user._id }).select('-answerKey');
+    const test = await MockTest.findOne({ _id: req.params.id, userId: req.user._id })
+      .select('-answerKey')
+      .populate('structuredQuestions');
+
     if (!test) return res.status(404).json({ error: 'Test not found' });
     res.json(test);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 
 router.put('/:id/answer-key', async (req, res) => {
@@ -488,6 +673,15 @@ async function generateAndSaveFeedback(attemptId, attempt, mockTest, user) {
 
     const baseAnswers = Array.isArray(attempt.userAnswers) ? attempt.userAnswers : [];
 
+    // Skip AI Feedback for PDF mode (Fallback requirement)
+    if (mockTest.mode === 'pdf') {
+      await TestAttempt.findByIdAndUpdate(attemptId, {
+        feedbackStatus: 'completed',
+        aiFeedback: { headline: "Result Calculated", summary: { strengths: ["Test submitted"], studyRecommendations: "Review the answers manually." } }
+      });
+      return;
+    }
+
     // --- STEP 2: Identify WRONG questions ---
     const wrongQuestions = [];
     const allQuestions = baseAnswers.map(ans => {
@@ -562,6 +756,38 @@ async function generateAndSaveFeedback(attemptId, attempt, mockTest, user) {
     } catch (updateErr) {
       console.error("Failed to update attempt status:", updateErr.message);
     }
+  }
+}
+
+async function processPdfWithoutAI(mockTestId, testPdfPath, answerKeyText, totalQ) {
+  try {
+    // 1. Just upload the PDF
+    const testUpload = await uploadFileToUploadthing(testPdfPath, false);
+    if (!testUpload?.url) throw new Error("PDF upload failed");
+
+    // 2. Parse answer key using simple regex (No AI)
+    const finalKey = extractAnswersRegex(answerKeyText);
+    const answerKeyMap = new Map(Object.entries(finalKey));
+
+    // 3. Save to DB without question images/texts (Fallback mode simplicity)
+    await MockTest.findByIdAndUpdate(mockTestId, {
+      testPdfPath: testUpload.url,
+      testPdfKey: testUpload.key,
+      answerKey: answerKeyMap,
+      answerKeyCount: answerKeyMap.size,
+      status: 'ready',
+      mode: 'pdf'
+    });
+
+    if (fs.existsSync(testPdfPath)) {
+      try { fs.unlinkSync(testPdfPath); } catch (e) { }
+    }
+  } catch (err) {
+    console.error("[Fallback PDF] Error:", err.message);
+    if (fs.existsSync(testPdfPath)) {
+      try { fs.unlinkSync(testPdfPath); } catch (e) { }
+    }
+    throw err;
   }
 }
 

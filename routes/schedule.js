@@ -37,25 +37,31 @@ router.post('/generate', async (req, res) => {
     const dateStr = req.body?.date;
     const now = new Date();
     const startMinutes = (now.getHours() * 60) + now.getMinutes();
-    if (startMinutes >= (23 * 60)) {
-      return res.status(400).json({ error: 'Schedule can be generated only before 11:00 PM for today.' });
+    console.log('[Schedule Generate] Current time minutes:', startMinutes, '| Date:', dateStr);
+    if (startMinutes >= (23 * 60 + 45)) {
+      return res.status(400).json({ error: 'Schedule can be generated only before 11:45 PM for today.' });
     }
-    const roundedStart = Math.min(23 * 60, Math.ceil(startMinutes / 15) * 15);
     const toHHMM = (mins) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
 
     const targetDate = dateStr ? new Date(dateStr) : new Date();
     targetDate.setUTCHours(0, 0, 0, 0);
 
+    // Use reasonable window - if current time is after 10 PM, use next day's early window logic
+    // For now, always use a fixed window from 9 AM to 11 PM for scheduling
+    const windowStart = 6 * 60;  // 6 AM
+    const windowEnd = 23 * 60;  // 11 PM
+
     const schedule = await schedulerService.generateScheduleForUser(req.user, {
       resetRefinements: true,
       date: targetDate,
       scheduleWindow: {
-        startTime: toHHMM(roundedStart),
-        endTime: '23:00',
+        startTime: toHHMM(windowStart),
+        endTime: toHHMM(windowEnd),
       },
     });
     res.json(schedule);
   } catch (err) {
+    console.error('[Schedule Generate Error]:', err);
     res.status(500).json({ error: err.message });
   }
 });

@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 const userAnswerSchema = new mongoose.Schema({
   questionNumber: { type: Number, required: true },
-  answer: { type: String, enum: ['A', 'B', 'C', 'D', null], default: null }, 
+  answer: { type: String, enum: ['A', 'B', 'C', 'D', null], default: null },
   isCorrect: { type: Boolean, default: false },
   marksAwarded: { type: Number, default: 0 },
   correctAnswer: { type: String },
@@ -9,7 +9,8 @@ const userAnswerSchema = new mongoose.Schema({
   topic: { type: String, default: null },
   imageUrl: { type: String, default: null },
   questionImageUrl: { type: String, default: null }, // Cropped question image
-  coreTopic: { type: String, default: null }, // Extracted core topic
+  questionText: { type: String },
+  explanation: { type: String },
   mentorAdvice: { type: String, default: null }, // 2-3 line advice
 });
 const subjectBreakdownSchema = new mongoose.Schema({
@@ -22,17 +23,17 @@ const subjectBreakdownSchema = new mongoose.Schema({
   accuracy: { type: Number, default: 0 },
 });
 const testAttemptSchema = new mongoose.Schema({
-  userId: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'User', 
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
     required: true,
-    index: true 
+    index: true
   },
-  mockTestId: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'MockTest', 
+  mockTestId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'MockTest',
     required: true,
-    index: true 
+    index: true
   },
   testName: { type: String, required: true },
   userAnswers: [userAnswerSchema],
@@ -51,12 +52,12 @@ const testAttemptSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.Mixed,
     default: null
   },
-  
-  testSeriesId: { 
-  type: mongoose.Schema.Types.ObjectId, 
-  ref: 'TestSeries', 
-  required: false // Starting mein false rakho taaki purane tests break na hon
-},
+
+  testSeriesId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'TestSeries',
+    required: false // Starting mein false rakho taaki purane tests break na hon
+  },
 
   weakAreas: [{ type: String }], // Topics list ke liye
   deepAnalysis: [{
@@ -73,7 +74,7 @@ const testAttemptSchema = new mongoose.Schema({
   },
 
   schedulerFeedbackApplied: { type: Boolean, default: false },
-}, { 
+}, {
   timestamps: true // createdAt aur updatedAt automatic mil jayenge
 });
 testAttemptSchema.index({ userId: 1, submittedAt: -1 });
