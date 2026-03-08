@@ -1,238 +1,255 @@
 import { aiService } from '../services/aiService.js';
+
 /**
  * Smart UPSC Question Paper & Solution Parser
- * Designed specifically for ForumIAS / CDS / standard PDF-extracted text
- *
- * QUESTION FORMAT:
- *   Q.1) Question text...
- *   a) Option A
- *   b) Option B
- *   c) Option C
- *   d) Option D
- *
- * SOLUTION FORMAT:
- *   Q.1) Question text... (repeated)
- *   a) ... b) ... c) ... d) ...
- *   Ans) a
- *   Exp) Full explanation here...
- *   Subject:) Polity
- *   Topic:)...
+ * Logic: AI used ONLY for complex Tables. Local Regex handles everything else.
  */
 
-// ─── GARBAGE PATTERNS (ForumIAS specific + general noise) ───────────────────
+// ─── GARBAGE PATTERNS ───────────────────────────────────────────────────────
 const GARBAGE_PATTERNS = [
-    // Forum footer address lines
     /Forum Learning Centre:.*(\n|$)/gi,
     /.*Canal Road,.*(\n|$)/gi,
     /.*Jawahar Nagar,.*(\n|$)/gi,
     /.*Pusa Road,.*(\n|$)/gi,
-
-    // SFG test headers
     /SFG \d{4}\s*\|.*(\n|$)/gi,
-
-    // URLs and links
+    /Page\s+\d+\s+of\s+\d+/gi,
+    /^Page\s+\d+.*$/gim,
     /https?:\/\/\S+/gi,
     /www\.\S+/gi,
-
-    // Email addresses
     /\S+@\S+\.\S+/gi,
-
-    // Phone numbers (10-digit Indian)
     /\d{10}(?:[,\s]+\d{10})*/g,
-
-    // Page markers [2] [3] etc.
     /\[\d{1,3}\]/g,
-
-    // Percentage noise
     /\b(?:100|75|50|25|0)%/g,
-
-    // Source / Subject / Topic metadata lines
     /^Source:\).*(\n|$)/gmi,
     /^Subject:\).*(\n|$)/gmi,
     /^Topic:\).*(\n|$)/gmi,
     /^Subtopic:\)?.*(\n|$)/gmi,
+    /Only For Premium Members.*/gi,
+    /https:\/\/upsccopycenter\.com\/.*/gi,
+    /UnderStand UPSC.*/gi,
+    /Join Now.*/gi,
 ];
 
-/**
- * Clean raw text by removing garbage patterns
- */
+// ─── HELPERS ────────────────────────────────────────────────────────────────
 export const cleanRawText = (text) => {
     if (!text) return "";
     let cleaned = text;
-    for (const pattern of GARBAGE_PATTERNS) {
-        cleaned = cleaned.replace(pattern, '');
-    }
-    // Collapse excessive blank lines
-    cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
-    return cleaned.trim();
+    for (const pattern of GARBAGE_PATTERNS) cleaned = cleaned.replace(pattern, '');
+    return cleaned.replace(/\n{3,}/g, '\n\n').trim();
 };
 
-// ─── QUESTION PARSER ────────────────────────────────────────────────────────
+const cleanTextInline = (text) => text?.replace(/[ \t]+/g, ' ').replace(/\n+/g, ' ').trim() || '';
 
-/**
- * Split text into question blocks.
- * Specifically matches Q.N) or Q.N. at start of a line.
- * This is STRICT — "Q." prefix is REQUIRED to avoid matching numbers inside text.
- */
-const splitByQuestionMarker = (text) => {
-    // Matches: Q.1) Q.2) Q.10) OR Q.1. Q.2.  — "Q." is required
-    const markerRegex = /(?:^|\n)\s*Q\.(\d+)\s*[\.\)]/gm;
-    const blocks = [];
-    let lastIndex = 0;
-    let lastQNum = null;
-    let match;
+// ─── TYPE DETECTION ─────────────────────────────────────────────────────────
+export const detectQuestionType = (questionText) => {
+    const text = questionText.toLowerCase();
+    if (/(pairs|match the|correctly matched|following pairs|match List I with List II)/i.test(text)) return 'table_match';
+    if (/statement\s+I[:\s]/i.test(text)) return 'statement_pair';
+    if (/assertion[:\s]/i.test(text) && /reason[:\s]/i.test(text)) return 'assertion_reason';
+    if (/\b(I{1,3}|IV|V)\s*[\.\)]/.test(questionText)) return 'roman_numeral';
+    if (/\b[1-9]\.\s+[A-Z]/.test(questionText)) return 'numeric_statements';
+    return 'regular_mcq';
+};
 
-    while ((match = markerRegex.exec(text)) !== null) {
-        if (lastQNum !== null) {
-            blocks.push({
-                qNum: lastQNum,
-                body: text.substring(lastIndex, match.index).trim()
-            });
+// ─── LOCAL EXTRACTORS ───────────────────────────────────────────────────────
+const extractRomanNumeralStatements = (text) => {
+    const statements = [];
+    const regex = /\b(I{1,3}|IV|V)\s*[\.\)]\s*([\s\S]*?)(?=\b(I{1,3}|IV|V)\s*[\.\)]|which|select|answer|$)/gi;
+    let m;
+    while ((m = regex.exec(text)) !== null) {
+        statements.push({ label: m[1].toUpperCase(), text: m[2].trim() });
+    }
+    return statements;
+};
+
+const extractNumericStatements = (text) => {
+    const statements = [];
+    const regex = /\b([1-9])[\.\)]\s+([\s\S]*?)(?=\b[1-9][\.\)]|which|select|answer|$)/gi;
+    let m;
+    while ((m = regex.exec(text)) !== null) {
+        statements.push({ label: m[1], text: m[2].trim() });
+    }
+    return statements;
+};
+
+const extractStatementPair = (text) => {
+    const s1 = text.match(/Statement\s+I[:\s]+([\s\S]*?)(?=Statement\s+II|$)/i);
+    const s2 = text.match(/Statement\s+II[:\s]+([\s\S]*?)(?=Which|Select|$)/i);
+    return { "Statement I": s1?.[1]?.trim(), "Statement II": s2?.[1]?.trim() };
+};
+
+const extractAssertionReason = (text) => {
+    const a = text.match(/Assertion[:\s]+([\s\S]*?)(?=Reason|$)/i);
+    const r = text.match(/Reason[:\s]+([\s\S]*?)(?=Which|Select|$)/i);
+    return { "Assertion": a?.[1]?.trim(), "Reason": r?.[1]?.trim() };
+};
+
+// ─── HTML FORMATTER ─────────────────────────────────────────────────────────
+// export const formatQuestionTextToHTML = async (text, type, statements) => {
+//     if (!text) return "";
+
+//     if (type === 'table_match') {
+//         try {
+//             const aiFormatted = await aiService.formatTableQuestion(text);
+//             if (aiFormatted) return `<div class="ai-table-wrapper">${aiFormatted}</div>`;
+//         } catch (e) { console.error("AI Table Fail", e); }
+//     }
+
+//     let html = `<div class="space-y-4">`;
+//     const mainText = text.split(/\b(I\.|1\.|Statement I|Assertion)/i)[0].trim();
+//     html += `<p class="font-semibold text-lg text-white">${mainText.replace(/\n/g, '<br/>')}</p>`;
+
+//     if (type === 'statement_pair' || type === 'assertion_reason') {
+//         html += `<div class="bg-slate-800/40 p-4 rounded-lg border-l-4 border-blue-500 space-y-3">`;
+//         for (const [key, val] of Object.entries(statements)) {
+//             if (val) html += `<p class="text-gray-200"><strong>${key}:</strong> ${val}</p>`;
+//         }
+//         html += `</div>`;
+//     } 
+//     else if ((type === 'roman_numeral' || type === 'numeric_statements') && statements?.length) {
+//         html += `<div class="pl-4 space-y-2">`;
+//         statements.forEach(s => {
+//             html += `<p class="text-gray-200"><span class="text-blue-400 font-bold">${s.label}.</span> ${cleanTextInline(s.text)}</p>`;
+//         });
+//         html += `</div>`;
+//     }
+
+//     return html + `</div>`;
+// };
+export const formatQuestionTextToHTML = async (text, type, statements) => {
+    if (!text) return "";
+
+    // Table Match logic (AI)
+    if (type === 'table_match') {
+        try {
+            const aiFormatted = await aiService.formatTableQuestion(text);
+            if (aiFormatted) return `<div class="w-full overflow-hidden">${aiFormatted}</div>`;
+        } catch (e) { console.error("AI Table Fail", e); }
+    }
+
+    // 1. QUESTION TEXT LOGIC (RIGHT SPACE FIX)
+    // Sabse pehle markers (I., 1., Statement) ka index dhundhein
+    const splitMatch = text.match(/\b(I\.|1\.|Statement I|Assertion)/i);
+    
+    // Pura question text nikalen
+    let mainTextRaw = splitMatch ? text.substring(0, splitMatch.index).trim() : text.trim();
+    
+    // RIGHT SPACE FIX: Saari inner newlines ko spaces se badal den taaki single line flow bane
+    const mainTextCleaned = mainTextRaw.replace(/\s+/g, ' ');
+
+    let html = `<div class="w-full flex flex-col items-stretch space-y-4">`;
+    
+    // Question Block: Isme 'w-full' aur 'block' ensures it stretches to edge
+    html += `<div class="w-full block">
+                <h3 class="text-lg font-bold text-white leading-normal w-full break-words">
+                    ${mainTextCleaned}
+                </h3>
+             </div>`;
+
+    // 2. STATEMENTS LOGIC
+    if ((type === 'statement_pair' || type === 'assertion_reason') && statements) {
+        html += `<div class="w-full bg-slate-800/40 p-4 rounded-lg border-l-4 border-yellow-500 space-y-2">`;
+        for (const [key, val] of Object.entries(statements)) {
+            if (val) html += `<p class="text-gray-200 w-full"><strong>${key}:</strong> ${val}</p>`;
         }
+        html += `</div>`;
+    } 
+    else if ((type === 'roman_numeral' || type === 'numeric_statements') && statements?.length) {
+        // 'flex-col items-stretch' ensures statements also use full width
+        html += `<div class="w-full flex flex-col space-y-2 pl-1">`;
+        statements.forEach(s => {
+            html += `<div class="flex items-start w-full">
+                        <span class="text-yellow-400 font-bold min-w-[30px] shrink-0">${s.label}.</span> 
+                        <span class="text-gray-200 flex-grow">${cleanTextInline(s.text)}</span>
+                     </div>`;
+        });
+        html += `</div>`;
+    }
+
+    return html + `</div>`;
+};
+// ─── CORE QUESTION PARSER ───────────────────────────────────────────────────
+export const parseQuestions = async (rawText) => {
+    const cleaned = cleanRawText(rawText);
+    const markerRegex = /(?:^|\n)\s*Q\.?(\d+)\s*[\.\)]/gm;
+    const questions = [];
+    
+    let match, lastIndex = 0, lastQNum = null;
+    const blocks = [];
+
+    while ((match = markerRegex.exec(cleaned)) !== null) {
+        if (lastQNum !== null) blocks.push({ qNum: lastQNum, body: cleaned.substring(lastIndex, match.index).trim() });
         lastQNum = parseInt(match[1]);
         lastIndex = match.index + match[0].length;
     }
-    // Last block
-    if (lastQNum !== null) {
-        blocks.push({
-            qNum: lastQNum,
-            body: text.substring(lastIndex).trim()
-        });
-    }
-    return blocks;
-};
-
-/**
- * Extract options a), b), c), d) from a question body.
- * Options must start at the beginning of a line (with optional whitespace).
- * Uses a strict line-start pattern to avoid matching (a), (b) inside explanation text.
- */
-const extractOptions = (body) => {
-    // Matches: "a)" or "a." at the START of a line (not inside text)
-    const optionLineRegex = /^[ \t]*([a-d])[ \t]*[\.\)]\s*/gm;
-    const optionPositions = [];
-    let m;
-
-    while ((m = optionLineRegex.exec(body)) !== null) {
-        optionPositions.push({ letter: m[1].toLowerCase(), start: m.index, headerLength: m[0].length });
-    }
-
-    if (optionPositions.length === 0) return { options: null, firstOptionIndex: -1 };
-
-    const options = { a: 'Option A', b: 'Option B', c: 'Option C', d: 'Option D' };
-
-    for (let i = 0; i < optionPositions.length; i++) {
-        const { letter, start, headerLength } = optionPositions[i];
-        const valueStart = start + headerLength;
-        const valueEnd = i + 1 < optionPositions.length ? optionPositions[i + 1].start : body.length;
-        const value = body.substring(valueStart, valueEnd).replace(/\n/g, ' ').trim();
-        if (value) options[letter] = value;
-    }
-
-    return { options, firstOptionIndex: optionPositions[0].start };
-};
-
-
-/**
- * Intelligently converts raw question text into structured HTML via Groq AI.
- * Detects "match the following", "consider the following pairs" type questions
- * and automatically formats the listed items into an HTML table.
- */
-export const formatQuestionTextToHTML = async (text) => {
-    if (!text) return "";
-
-    let html = "";
-    const isTableQuestion = /(pairs|match the|correctly matched|following pairs|match List I with List II)/i.test(text);
-
-    if (isTableQuestion) {
-        try {
-            const aiFormatted = await aiService.formatTableQuestion(text);
-            if (aiFormatted && aiFormatted.length > 20) {
-                return aiFormatted;
-            }
-        } catch (e) {
-            console.error("[Parser] AI Format failed, fallback to plain parsing", e);
-        }
-    }
-
-    // Regular text formatting fallback
-    const paragraphs = text.split(/\n{2,}/).map(p => p.trim()).filter(p => p);
-    if (paragraphs.length > 0) {
-        html = `<div class="space-y-4">` + paragraphs.map(p => `<p>${p.replace(/\n/g, '<br/>')}</p>`).join('') + `</div>`;
-    } else {
-        html = `<div class="space-y-4"><p>${text.replace(/\n/g, '<br/>')}</p></div>`;
-    }
-
-    return html;
-};
-
-/**
- * Parse questions from raw question paper text.
- * Handles: simple questions, numbered list questions, table/match-the-column questions.
- */
-export const parseQuestions = async (rawText) => {
-    const cleanedText = cleanRawText(rawText);
-    const blocks = splitByQuestionMarker(cleanedText);
-    const questions = [];
+    if (lastQNum) blocks.push({ qNum: lastQNum, body: cleaned.substring(lastIndex).trim() });
 
     for (const { qNum, body } of blocks) {
-        const { options, firstOptionIndex } = extractOptions(body);
+        const optRegex = /^[ \t]*\(?([a-d])\)?[ \t]*[\.\)]\s*/gm;
+        let m, firstOptIdx = -1, options = { a:'', b:'', c:'', d:'' };
+        const optPositions = [];
 
-        // Question text = everything before first option
-        const questionText = firstOptionIndex !== -1
-            ? body.substring(0, firstOptionIndex).trim()
-            : body.trim();
+        while ((m = optRegex.exec(body)) !== null) {
+            if (firstOptIdx === -1) firstOptIdx = m.index;
+            optPositions.push({ letter: m[1].toLowerCase(), start: m.index, len: m[0].length });
+        }
 
-        // Skip if no meaningful content
-        if (!questionText && (!options || !options.a)) continue;
+        for (let i = 0; i < optPositions.length; i++) {
+            const end = optPositions[i+1] ? optPositions[i+1].start : body.length;
+            options[optPositions[i].letter] = body.substring(optPositions[i].start + optPositions[i].len, end).replace(/\n/g, ' ').trim();
+        }
 
-        const formattedHTML = await formatQuestionTextToHTML(questionText);
+        const qTextRaw = firstOptIdx !== -1 ? body.substring(0, firstOptIdx).trim() : body.trim();
+        const type = detectQuestionType(qTextRaw);
+        
+        let stmts = null;
+        if (type === 'roman_numeral') stmts = extractRomanNumeralStatements(qTextRaw);
+        else if (type === 'numeric_statements') stmts = extractNumericStatements(qTextRaw);
+        else if (type === 'statement_pair') stmts = extractStatementPair(qTextRaw);
+        else if (type === 'assertion_reason') stmts = extractAssertionReason(qTextRaw);
+
+        const html = await formatQuestionTextToHTML(qTextRaw, type, stmts);
 
         questions.push({
             questionNumber: qNum,
-            questionText: formattedHTML,
-            options: options || { a: 'Option A', b: 'Option B', c: 'Option C', d: 'Option D' }
+            questionText: html,
+            options: options,
+            questionType: type
         });
     }
-
     return questions;
 };
 
-// ─── SOLUTION PARSER ────────────────────────────────────────────────────────
-
-/**
- * Parse solutions from raw solution book text.
- * Looks for the specific pattern:
- *   Ans) a        ← correct answer letter
- *   Exp) ...      ← explanation text
- */
+// ─── SOLUTIONS PARSER ───────────────────────────────────────────────────────
 export const parseSolutions = (rawText) => {
-    const cleanedText = cleanRawText(rawText);
-    const blocks = splitByQuestionMarker(cleanedText);
+    const cleaned = cleanRawText(rawText);
+    const markerRegex = /(?:^|\n)\s*Q\.?(\d+)\s*[\.\)]/gm;
     const solutions = [];
 
-    for (const { qNum, body } of blocks) {
-        // 1. Find answer: "Ans) a" or "Ans. a" or "Ans: a" (exact, at start of a line)
-        const ansMatch = body.match(/\bAns[\.\):\s]+\s*\(?([a-d])\)?/im);
+    let match, lastIndex = 0, lastQNum = null;
+    const blocks = [];
 
-        if (!ansMatch) {
-            console.warn(`[Parser] No answer found for Q${qNum}. Snippet: "${body.substring(0, 100).replace(/\n/g, ' ')}"`);
-            continue;
-        }
+    while ((match = markerRegex.exec(cleaned)) !== null) {
+        if (lastQNum !== null) blocks.push({ qNum: lastQNum, body: cleaned.substring(lastIndex, match.index).trim() });
+        lastQNum = parseInt(match[1]);
+        lastIndex = match.index + match[0].length;
+    }
+    if (lastQNum) blocks.push({ qNum: lastQNum, body: cleaned.substring(lastIndex).trim() });
+
+    for (const { qNum, body } of blocks) {
+        const ansMatch = body.match(/(?:Answer|Ans)[\s:]*\)?\s*\(?([a-d])\)?/im);
+        if (!ansMatch) continue;
 
         const answer = ansMatch[1].toUpperCase();
-
-        // 2. Find explanation: "Exp) ..." — everything after this marker, cleanup metadata
         let explanation = '';
-        const expMatch = body.match(/\bExp[\.\):\s]+\s*([\s\S]*)/im);
+        const expMatch = body.match(/(?:Exp|Explanation)[\s:]*\)?\s*([\s\S]*)/im);
+        
         if (expMatch) {
             explanation = expMatch[1]
-                // Remove metadata footer lines that appear at the end
                 .replace(/\bKnowledge Base\s*:[\s\S]*/i, '')
                 .replace(/\bSource\s*:\)[\s\S]*/i, '')
                 .trim();
         } else {
-            // Fallback: everything after the Ans line
             explanation = body.substring(ansMatch.index + ansMatch[0].length).trim();
         }
 
@@ -242,15 +259,10 @@ export const parseSolutions = (rawText) => {
             explanation
         });
     }
-
     return solutions;
 };
 
 // ─── MAPPER ─────────────────────────────────────────────────────────────────
-
-/**
- * Maps questions and solutions by questionNumber.
- */
 export const mapQuestionsAndSolutions = (questions, solutions) => {
     const solutionMap = new Map();
     solutions.forEach(s => solutionMap.set(s.questionNumber, s));
@@ -265,11 +277,7 @@ export const mapQuestionsAndSolutions = (questions, solutions) => {
     });
 };
 
-// ─── LEGACY FALLBACK ─────────────────────────────────────────────────────────
-
-/**
- * Simple regex answer key extractor — used for PDF mode only.
- */
+// ─── LEGACY / PDF FALLBACK ──────────────────────────────────────────────────
 export const extractAnswersRegex = (text) => {
     const answerKey = {};
     const regex = /(\d+)[\.\s\-\)]+([ABCDabcd])/g;
