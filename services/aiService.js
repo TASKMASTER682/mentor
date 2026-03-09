@@ -552,5 +552,53 @@ Do not wrap your output in markdown code blocks (\`\`\`html) - return ONLY the r
       console.error('AI Table Formatting Error:', err);
       return null;
     }
-  }
+  },
+
+  async formatComplexQuestion(questionText, statements) {
+    try {
+      const response = await getGroqClient().chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
+        messages: [{
+          role: 'system',
+          content: `You are an expert UPSC question formatter. 
+Your task is to take a raw question text that contains statements and an instruction phrase (like "Which of the statements above is correct?").
+
+GUIDELINES:
+1. Identify the Main Header: The text before any statements start.
+2. Identify the Statements: Usually numbered 1, 2, 3 or labeled Statement-I, II, etc.
+3. Identify the Tail Phrase: The final question/instruction (e.g., "Select the correct answer...", "How many of the above...").
+4. IMPORTANT: Do NOT repeat the tail phrase in the header or statements. Remove any duplicate text.
+
+OUTPUT FORMAT:
+Return a clean HTML structure:
+- Wrap the Header in <h3 classname="text-lg font-bold text-white mb-4">.
+- Wrap statements in a bg-slate-800/40 p-4 rounded border-l-4 border-yellow-500 container.
+- Use text-yellow-400 font-bold for numbering (1, 2, 3
+- Wrap the Tail Phrase in a separate <p classname="mt-4 pt-2 border-t border-gray-700 italic text-white font-medium">.
+
+Return ONLY the raw HTML string without markdown code blocks.`
+        }, {
+          role: 'user',
+          content: `Question Text: ${questionText}\nStatements Data: ${JSON.stringify(statements)}`
+        }],
+        temperature: 0.1
+      });
+
+      let html = response.choices[0].message.content.trim();
+      
+      // Clean markdown if AI includes it
+      if (html.startsWith('```html')) {
+        html = html.replace(/^```html|```$/g, '').trim();
+      } else if (html.startsWith('```')) {
+        html = html.replace(/^```|```$/g, '').trim();
+      }
+      
+      return html;
+    } catch (err) {
+      console.error('AI Complex Formatting Error:', err);
+      return null;
+    }
+}
 };
+
+'Wrap the header in text-white font-bold text-lg mb-4. Wrap statements in a bg-slate-800/40 p-4 rounded border-l-4 border-yellow-500 container. Use text-yellow-400 font-bold for numbering (1, 2, 3). Ensure the tail instruction is italic text-gray-300 mt-4 pt-2 border-t border-gray-700'

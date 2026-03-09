@@ -27,6 +27,7 @@ const GARBAGE_PATTERNS = [
     /Only For Premium Members.*/gi,
     /https:\/\/upsccopycenter\.com\/.*/gi,
     /UnderStand UPSC.*/gi,
+    /\bEP-\d+/g,
     /Join Now.*/gi,
 ];
 
@@ -95,18 +96,38 @@ const extractAssertionReason = (text) => {
 
 // ─── HTML FORMATTER ─────────────────────────────────────────────────────────
 
-
 export const formatQuestionTextToHTML = async (text, type, statements) => {
     if (!text) return "";
 
-    // 1. AI TRIGGER (Tables)
-    if (type === 'table_match') {
+    // 1. AI TRIGGER LOGIC (Refined for Table vs Complex Text)
+    const whichCount = (text.match(/\bWhich\b/gi) || []).length;
+    const howCount = (text.match(/\bHow\b/gi) || []).length;
+    const selectCount = (text.match(/\bSelect\b/gi) || []).length;
+
+    // Conditions for Complex Text Redundancy
+    const hasRedundancy = (whichCount > 0 && howCount > 0) || (howCount > 1) || (whichCount > 1) || (selectCount > 1);
+
+    // AI Execution Block
+    if (type === 'table_match' || (hasRedundancy && statements)) {
         try {
-            const aiFormatted = await aiService.formatTableQuestion(text);
+            let aiFormatted = null;
+
+            // CASE A: Table Match Question (Use Table Formatter only)
+            if (type === 'table_match' && typeof aiService.formatTableQuestion === 'function') {
+                aiFormatted = await aiService.formatTableQuestion(text);
+            } 
+            // CASE B: Complex Text Question (Use Complex Formatter only)
+            else if (hasRedundancy && statements && typeof aiService.formatComplexQuestion === 'function') {
+                aiFormatted = await aiService.formatComplexQuestion(text, statements);
+            }
+
             if (aiFormatted) return `<div class="w-full">${aiFormatted}</div>`;
-        } catch (e) { console.error("AI Table Fail", e); }
+        } catch (e) { 
+            console.error("AI Formatting Fail, falling back to Regex", e); 
+        }
     }
 
+    // 2. EXTRACTION LOGIC (Working perfectly for Simple Questions)
     const statementMarkerRegex = /\b(I\.|1\.|Statement[- ]?I|Assertion)/i;
     const questionPhraseRegex = /\b(Which|How many|In how many|Select|Match|With reference)\b/i;
     const hasStatements = statementMarkerRegex.test(text);
@@ -130,21 +151,22 @@ export const formatQuestionTextToHTML = async (text, type, statements) => {
 
     let html = `<div class="w-full flex flex-col space-y-4">`;
     
-    // HEADER
+    // HEADER RENDER
     html += `<div class="w-full">
                 <h3 class="text-lg font-bold text-white leading-snug w-full">
                     ${questionHeader.replace(/\s+/g, ' ')}
                 </h3>
              </div>`;
 
-    // 3. STATEMENTS RENDER (Strict Check)
+    // 3. STATEMENTS RENDER
     if (statements && typeof statements === 'object') {
-        const entries = Object.entries(statements).filter(([_, v]) => v !== null);
+        const entries = Object.entries(statements).filter(([_, v]) => v !== null && v !== undefined);
         
         if (entries.length > 0 || Array.isArray(statements)) {
             html += `<div class="w-full bg-slate-800/40 p-4 rounded-lg border-l-4 border-yellow-500 flex flex-col space-y-3">`;
             
             if (!Array.isArray(statements)) {
+                // Object Case (Statement I, II, III)
                 entries.forEach(([key, val]) => {
                     const cleanVal = val.split(questionPhraseRegex)[0].trim();
                     html += `<p class="text-gray-200 w-full flex items-start">
@@ -153,12 +175,15 @@ export const formatQuestionTextToHTML = async (text, type, statements) => {
                              </p>`;
                 });
             } else {
+                // Array Case (Numeric/Roman)
                 statements.forEach(s => {
-                    const cleanStmt = s.text.split(questionPhraseRegex)[0].trim();
-                    html += `<div class="flex items-start w-full py-0.5">
-                                <span class="text-yellow-400 font-bold min-w-[35px] shrink-0">${s.label}.</span> 
-                                <span class="text-gray-200 flex-grow leading-relaxed">${cleanStmt.replace(/\s+/g, ' ')}</span>
-                             </div>`;
+                    if (s && s.text) {
+                        const cleanStmt = s.text.split(questionPhraseRegex)[0].trim();
+                        html += `<div class="flex items-start w-full py-0.5">
+                                    <span class="text-yellow-400 font-bold min-w-[35px] shrink-0">${s.label}.</span> 
+                                    <span class="text-gray-200 flex-grow leading-relaxed">${cleanStmt.replace(/\s+/g, ' ')}</span>
+                                 </div>`;
+                    }
                 });
             }
             html += `</div>`;
@@ -230,6 +255,47 @@ export const parseQuestions = async (rawText) => {
 };
 
 // ─── SOLUTIONS PARSER ───────────────────────────────────────────────────────
+// export const parseSolutions = (rawText) => {
+//     const cleaned = cleanRawText(rawText);
+//     const markerRegex = /(?:^|\n)\s*Q\.?(\d+)\s*[\.\)]/gm;
+//     const solutions = [];
+
+//     let match, lastIndex = 0, lastQNum = null;
+//     const blocks = [];
+
+//     while ((match = markerRegex.exec(cleaned)) !== null) {
+//         if (lastQNum !== null) blocks.push({ qNum: lastQNum, body: cleaned.substring(lastIndex, match.index).trim() });
+//         lastQNum = parseInt(match[1]);
+//         lastIndex = match.index + match[0].length;
+//     }
+//     if (lastQNum) blocks.push({ qNum: lastQNum, body: cleaned.substring(lastIndex).trim() });
+
+//     for (const { qNum, body } of blocks) {
+//         const ansMatch = body.match(/(?:Answer|Ans)[\s:]*\)?\s*\(?([a-d])\)?/im);
+//         if (!ansMatch) continue;
+
+//         const answer = ansMatch[1].toUpperCase();
+//         let explanation = '';
+//         const expMatch = body.match(/(?:Exp|Explanation)[\s:]*\)?\s*([\s\S]*)/im);
+        
+//         if (expMatch) {
+//             explanation = expMatch[1]
+//                 .replace(/\bKnowledge Base\s*:[\s\S]*/i, '')
+//                 .replace(/\bSource\s*:\)[\s\S]*/i, '')
+//                 .trim();
+//         } else {
+//             explanation = body.substring(ansMatch.index + ansMatch[0].length).trim();
+//         }
+
+//         solutions.push({
+//             questionNumber: qNum,
+//             correctAnswer: answer,
+//             explanation
+//         });
+//     }
+//     return solutions;
+// };
+// ─── IMPROVED SOLUTIONS PARSER ───────────────────────────────────────────────────────
 export const parseSolutions = (rawText) => {
     const cleaned = cleanRawText(rawText);
     const markerRegex = /(?:^|\n)\s*Q\.?(\d+)\s*[\.\)]/gm;
@@ -239,33 +305,45 @@ export const parseSolutions = (rawText) => {
     const blocks = [];
 
     while ((match = markerRegex.exec(cleaned)) !== null) {
-        if (lastQNum !== null) blocks.push({ qNum: lastQNum, body: cleaned.substring(lastIndex, match.index).trim() });
+        if (lastQNum !== null) {
+            blocks.push({ qNum: lastQNum, body: cleaned.substring(lastIndex, match.index).trim() });
+        }
         lastQNum = parseInt(match[1]);
         lastIndex = match.index + match[0].length;
     }
     if (lastQNum) blocks.push({ qNum: lastQNum, body: cleaned.substring(lastIndex).trim() });
 
     for (const { qNum, body } of blocks) {
+        // 1. Better Answer Detection (Handles: Ans: A, Answer - B, Ans) A)
         const ansMatch = body.match(/(?:Answer|Ans)[\s:]*\)?\s*\(?([a-d])\)?/im);
         if (!ansMatch) continue;
 
         const answer = ansMatch[1].toUpperCase();
-        let explanation = '';
-        const expMatch = body.match(/(?:Exp|Explanation)[\s:]*\)?\s*([\s\S]*)/im);
+        
+        // 2. Smart Explanation Extraction
+        let rawExplanation = '';
+        const expMatch = body.match(/(?:Exp|Explanation|Solution)[\s:]*\)?\s*([\s\S]*)/im);
         
         if (expMatch) {
-            explanation = expMatch[1]
-                .replace(/\bKnowledge Base\s*:[\s\S]*/i, '')
-                .replace(/\bSource\s*:\)[\s\S]*/i, '')
-                .trim();
+            rawExplanation = expMatch[1];
         } else {
-            explanation = body.substring(ansMatch.index + ansMatch[0].length).trim();
+            // Fallback: Answer marker ke baad ka saara text explanation hai
+            rawExplanation = body.substring(ansMatch.index + ansMatch[0].length).trim();
         }
+
+        // 3. Final Cleanup & Formatting
+        const finalExplanation = rawExplanation
+            .replace(/\bKnowledge Base\s*:[\s\S]*/i, '') // Extra section hatao
+            .replace(/\bSource\s*:\s*[\s\S]*/i, '')      // Source hatao
+            .replace(/(Statement\s*\d+)/gi, '<strong>$1</strong>') // Statements ko bold karo
+            .replace(/(Hence|Therefore|Correct\s*Option)/gi, '<br/><strong>$1</strong>') // New line focus
+            .replace(/\n/g, '<br/>') // Standard line breaks
+            .trim();
 
         solutions.push({
             questionNumber: qNum,
             correctAnswer: answer,
-            explanation
+            explanation: finalExplanation
         });
     }
     return solutions;
