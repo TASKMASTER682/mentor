@@ -44,11 +44,11 @@ const cleanTextInline = (text) => text?.replace(/[ \t]+/g, ' ').replace(/\n+/g, 
 export const detectQuestionType = (questionText) => {
     const text = questionText.toLowerCase();
     if (/(pairs|match the|correctly matched|following pairs|match List I with List II)/i.test(text)) return 'table_match';
-    if (/statement\s+I[:\s]/i.test(text)) return 'statement_pair';
+    if (/statement[- ]?I[:\s]/i.test(text)) return 'statement_pair';
     if (/assertion[:\s]/i.test(text) && /reason[:\s]/i.test(text)) return 'assertion_reason';
     if (/\b(I{1,3}|IV|V)\s*[\.\)]/.test(questionText)) return 'roman_numeral';
     if (/\b[1-9]\.\s+[A-Z]/.test(questionText)) return 'numeric_statements';
-    return 'regular_mcq';
+    return 'regular_mcq'
 };
 
 // ─── LOCAL EXTRACTORS ───────────────────────────────────────────────────────
@@ -73,9 +73,18 @@ const extractNumericStatements = (text) => {
 };
 
 const extractStatementPair = (text) => {
-    const s1 = text.match(/Statement\s+I[:\s]+([\s\S]*?)(?=Statement\s+II|$)/i);
-    const s2 = text.match(/Statement\s+II[:\s]+([\s\S]*?)(?=Which|Select|$)/i);
-    return { "Statement I": s1?.[1]?.trim(), "Statement II": s2?.[1]?.trim() };
+    // S1: Statement I se II tak
+    const s1 = text.match(/Statement[- ]?I[:\s]+([\s\S]*?)(?=Statement[- ]?II|$)/i);
+    // S2: Statement II se III tak (Agar III hai) ya phir Question Phrase tak
+    const s2 = text.match(/Statement[- ]?II[:\s]+([\s\S]*?)(?=Statement[- ]?III|Which|Select|How|Match|$)/i);
+    // S3: Statement III se Question Phrase tak
+    const s3 = text.match(/Statement[- ]?III[:\s]+([\s\S]*?)(?=Which|Select|How|Match|$)/i);
+
+    return { 
+        "Statement I": s1?.[1]?.trim() || null, 
+        "Statement II": s2?.[1]?.trim() || null, 
+        "Statement III": s3?.[1]?.trim() || null 
+    };
 };
 
 const extractAssertionReason = (text) => {
@@ -85,89 +94,89 @@ const extractAssertionReason = (text) => {
 };
 
 // ─── HTML FORMATTER ─────────────────────────────────────────────────────────
-// export const formatQuestionTextToHTML = async (text, type, statements) => {
-//     if (!text) return "";
 
-//     if (type === 'table_match') {
-//         try {
-//             const aiFormatted = await aiService.formatTableQuestion(text);
-//             if (aiFormatted) return `<div class="ai-table-wrapper">${aiFormatted}</div>`;
-//         } catch (e) { console.error("AI Table Fail", e); }
-//     }
 
-//     let html = `<div class="space-y-4">`;
-//     const mainText = text.split(/\b(I\.|1\.|Statement I|Assertion)/i)[0].trim();
-//     html += `<p class="font-semibold text-lg text-white">${mainText.replace(/\n/g, '<br/>')}</p>`;
-
-//     if (type === 'statement_pair' || type === 'assertion_reason') {
-//         html += `<div class="bg-slate-800/40 p-4 rounded-lg border-l-4 border-blue-500 space-y-3">`;
-//         for (const [key, val] of Object.entries(statements)) {
-//             if (val) html += `<p class="text-gray-200"><strong>${key}:</strong> ${val}</p>`;
-//         }
-//         html += `</div>`;
-//     } 
-//     else if ((type === 'roman_numeral' || type === 'numeric_statements') && statements?.length) {
-//         html += `<div class="pl-4 space-y-2">`;
-//         statements.forEach(s => {
-//             html += `<p class="text-gray-200"><span class="text-blue-400 font-bold">${s.label}.</span> ${cleanTextInline(s.text)}</p>`;
-//         });
-//         html += `</div>`;
-//     }
-
-//     return html + `</div>`;
-// };
 export const formatQuestionTextToHTML = async (text, type, statements) => {
     if (!text) return "";
 
-    // Table Match logic (AI)
+    // 1. AI TRIGGER (Tables)
     if (type === 'table_match') {
         try {
             const aiFormatted = await aiService.formatTableQuestion(text);
-            if (aiFormatted) return `<div class="w-full overflow-hidden">${aiFormatted}</div>`;
+            if (aiFormatted) return `<div class="w-full">${aiFormatted}</div>`;
         } catch (e) { console.error("AI Table Fail", e); }
     }
 
-    // 1. QUESTION TEXT LOGIC (RIGHT SPACE FIX)
-    // Sabse pehle markers (I., 1., Statement) ka index dhundhein
-    const splitMatch = text.match(/\b(I\.|1\.|Statement I|Assertion)/i);
-    
-    // Pura question text nikalen
-    let mainTextRaw = splitMatch ? text.substring(0, splitMatch.index).trim() : text.trim();
-    
-    // RIGHT SPACE FIX: Saari inner newlines ko spaces se badal den taaki single line flow bane
-    const mainTextCleaned = mainTextRaw.replace(/\s+/g, ' ');
+    const statementMarkerRegex = /\b(I\.|1\.|Statement[- ]?I|Assertion)/i;
+    const questionPhraseRegex = /\b(Which|How many|In how many|Select|Match|With reference)\b/i;
+    const hasStatements = statementMarkerRegex.test(text);
 
-    let html = `<div class="w-full flex flex-col items-stretch space-y-4">`;
+    let questionHeader = "";
+    let tailText = "";
+
+    if (hasStatements) {
+        const splitMatch = text.match(statementMarkerRegex);
+        questionHeader = text.substring(0, splitMatch.index).trim();
+        
+        const remainder = text.substring(splitMatch.index);
+        const phraseMatch = remainder.match(questionPhraseRegex);
+        if (phraseMatch) {
+            tailText = remainder.substring(phraseMatch.index).trim();
+        }
+    } else {
+        questionHeader = text.trim();
+        tailText = "";
+    }
+
+    let html = `<div class="w-full flex flex-col space-y-4">`;
     
-    // Question Block: Isme 'w-full' aur 'block' ensures it stretches to edge
-    html += `<div class="w-full block">
-                <h3 class="text-lg font-bold text-white leading-normal w-full break-words">
-                    ${mainTextCleaned}
+    // HEADER
+    html += `<div class="w-full">
+                <h3 class="text-lg font-bold text-white leading-snug w-full">
+                    ${questionHeader.replace(/\s+/g, ' ')}
                 </h3>
              </div>`;
 
-    // 2. STATEMENTS LOGIC
-    if ((type === 'statement_pair' || type === 'assertion_reason') && statements) {
-        html += `<div class="w-full bg-slate-800/40 p-4 rounded-lg border-l-4 border-yellow-500 space-y-2">`;
-        for (const [key, val] of Object.entries(statements)) {
-            if (val) html += `<p class="text-gray-200 w-full"><strong>${key}:</strong> ${val}</p>`;
+    // 3. STATEMENTS RENDER (Strict Check)
+    if (statements && typeof statements === 'object') {
+        const entries = Object.entries(statements).filter(([_, v]) => v !== null);
+        
+        if (entries.length > 0 || Array.isArray(statements)) {
+            html += `<div class="w-full bg-slate-800/40 p-4 rounded-lg border-l-4 border-yellow-500 flex flex-col space-y-3">`;
+            
+            if (!Array.isArray(statements)) {
+                entries.forEach(([key, val]) => {
+                    const cleanVal = val.split(questionPhraseRegex)[0].trim();
+                    html += `<p class="text-gray-200 w-full flex items-start">
+                                <strong class="min-w-[120px] shrink-0 text-yellow-400 font-bold">${key}:</strong> 
+                                <span class="flex-grow leading-relaxed">${cleanVal.replace(/\s+/g, ' ')}</span>
+                             </p>`;
+                });
+            } else {
+                statements.forEach(s => {
+                    const cleanStmt = s.text.split(questionPhraseRegex)[0].trim();
+                    html += `<div class="flex items-start w-full py-0.5">
+                                <span class="text-yellow-400 font-bold min-w-[35px] shrink-0">${s.label}.</span> 
+                                <span class="text-gray-200 flex-grow leading-relaxed">${cleanStmt.replace(/\s+/g, ' ')}</span>
+                             </div>`;
+                });
+            }
+            html += `</div>`;
         }
-        html += `</div>`;
-    } 
-    else if ((type === 'roman_numeral' || type === 'numeric_statements') && statements?.length) {
-        // 'flex-col items-stretch' ensures statements also use full width
-        html += `<div class="w-full flex flex-col space-y-2 pl-1">`;
-        statements.forEach(s => {
-            html += `<div class="flex items-start w-full">
-                        <span class="text-yellow-400 font-bold min-w-[30px] shrink-0">${s.label}.</span> 
-                        <span class="text-gray-200 flex-grow">${cleanTextInline(s.text)}</span>
-                     </div>`;
-        });
-        html += `</div>`;
+    }
+
+    // 4. TAIL TEXT (Instruction Phrase)
+    if (tailText && tailText.length > 5 && tailText !== questionHeader) {
+        html += `<div class="mt-2 pt-2 border-t border-gray-700/50">
+                    <p class="text-white font-medium italic leading-relaxed">
+                        ${tailText.replace(/\s+/g, ' ')}
+                    </p>
+                 </div>`;
     }
 
     return html + `</div>`;
 };
+
 // ─── CORE QUESTION PARSER ───────────────────────────────────────────────────
 export const parseQuestions = async (rawText) => {
     const cleaned = cleanRawText(rawText);
