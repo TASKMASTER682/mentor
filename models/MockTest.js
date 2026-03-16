@@ -61,6 +61,7 @@ const mockTestSchema = new mongoose.Schema({
     enum: ['structured', 'pdf'],
     default: 'pdf'
   },
+  isActive: { type: Boolean, default: true },
   structuredQuestions: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Question'

@@ -11,7 +11,7 @@ const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 router.get('/profile', async (req, res) => {
   try {
     const user = req.user;
-    res.json({ id: user._id, name: user.name, email: user.email, profile: user.profile, stats: user.stats });
+    res.json({ id: user._id, name: user.name, email: user.email, role: user.role, profile: user.profile, stats: user.stats });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -25,7 +25,7 @@ router.patch('/profile', async (req, res) => {
       { profile: { ...req.user.profile.toObject(), ...profile } },
       { returnDocument: 'after' }
     );
-    res.json({ id: user._id, name: user.name, email: user.email, profile: user.profile, stats: user.stats });
+    res.json({ id: user._id, name: user.name, email: user.email, role: user.role, profile: user.profile, stats: user.stats });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

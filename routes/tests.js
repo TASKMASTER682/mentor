@@ -1,25 +1,49 @@
 import express from 'express';
-import { authenticate } from '../middleware/auth.js';
+import { authenticate, requireAdmin } from '../middleware/auth.js';
 import TestSeries from '../models/TestSeries.js';
 import TestAttempt from '../models/TestAttempt.js';
+import User from '../models/User.js';
+import jwt from 'jsonwebtoken';
 
 const router = express.Router();
-router.use(authenticate);
 
 function escapeRegex(value = '') {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Public - Get all test series (admin + user's own)
 router.get('/', async (req, res) => {
   try {
-    const tests = await TestSeries.find({ userId: req.user._id });
+    const adminUsers = await User.find({ role: 'admin' }).select('_id');
+    const adminUserIds = adminUsers.map(u => u._id);
+    
+    let filter = {};
+    
+    if (req.headers.authorization) {
+      try {
+        const token = req.headers.authorization.replace('Bearer ', '');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'upsc_secret_key');
+        const currentUserId = decoded.userId;
+        filter.$or = [
+          { userId: { $in: adminUserIds } },
+          { userId: currentUserId }
+        ];
+      } catch (e) {
+        filter.userId = { $in: adminUserIds };
+      }
+    } else {
+      filter.userId = { $in: adminUserIds };
+    }
+
+    const tests = await TestSeries.find(filter);
     res.json(tests);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-router.post('/', async (req, res) => {
+// Authenticated - Create test series (for user's own tests)
+router.post('/', authenticate, async (req, res) => {
   try {
     const test = new TestSeries({ userId: req.user._id, ...req.body });
     await test.save();
@@ -29,11 +53,20 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.get('/series-with-attempts', async (req, res) => {
+// Authenticated - Get user's series with attempts
+router.get('/series-with-attempts', authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
     
-    const seriesList = await TestSeries.find({ userId }).lean();
+    const adminUsers = await User.find({ role: 'admin' }).select('_id');
+    const adminUserIds = adminUsers.map(u => u._id);
+    
+    const seriesList = await TestSeries.find({
+      $or: [
+        { userId: { $in: adminUserIds } },
+        { userId }
+      ]
+    }).lean();
 
     const enrichedSeries = await Promise.all(seriesList.map(async (series) => {
       const seriesNamePattern = escapeRegex(series.name || '');
@@ -67,18 +100,16 @@ router.get('/series-with-attempts', async (req, res) => {
   }
 });
 
-router.delete('/:id', async (req, res) => {
+// Admin only - Delete test series
+router.delete('/:id', requireAdmin, async (req, res) => {
   try {
     const series = await TestSeries.findOneAndDelete({
-      _id: req.params.id,
-      userId: req.user.id
+      _id: req.params.id
     });
 
     if (!series) return res.status(404).json({ error: 'Series not found' });
 
-    // Delete all attempts associated with this series
     await TestAttempt.deleteMany({ 
-      userId: req.user.id,
       testSeriesId: req.params.id 
     });
 
@@ -88,9 +119,10 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-router.post('/:id/attempt', async (req, res) => {
+// Authenticated - Add attempt to test series
+router.post('/:id/attempt', authenticate, async (req, res) => {
   try {
-    const test = await TestSeries.findOne({ _id: req.params.id, userId: req.user._id });
+    const test = await TestSeries.findOne({ _id: req.params.id });
     if (!test) return res.status(404).json({ error: 'Test not found' });
 
     const attempt = { ...req.body, date: new Date() };

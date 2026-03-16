@@ -11,7 +11,7 @@ const questionSchema = new mongoose.Schema({
     },
     correctAnswer: { type: String, enum: ['A', 'B', 'C', 'D'], required: true },
     explanation: { type: String, default: "" },
-    subject: { type: String },
+    subject: { type: String, required: true },
     year: { type: Number },
     topics: [{ type: String }],
     isActive: { type: Boolean, default: true }

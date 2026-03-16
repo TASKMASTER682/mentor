@@ -6,13 +6,16 @@ const scheduleBlockSchema = new mongoose.Schema({
   subject: String,
   topic: String,
   taskType: { type: String, enum: ['learning', 'revision', 'answer_writing', 'mcq', 'test', 'break', 'fitness'] },
-  duration: Number, // minutes
+  duration: Number, // minutes (planned)
   priority: { type: String, enum: ['high', 'medium', 'low'] },
   missionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Mission' },
   sourceId: { type: mongoose.Schema.Types.ObjectId, ref: 'LibrarySource' },
   chapterIndex: Number,
   notes: String,
-  completed: { type: Boolean, default: false }
+  completed: { type: Boolean, default: false },
+  completedAt: { type: Date },
+  timeSpent: { type: Number, default: 0 }, // minutes actually spent
+  timerStartedAt: { type: Date } // when user started the timer
 });
 
 const scheduleSchema = new mongoose.Schema({

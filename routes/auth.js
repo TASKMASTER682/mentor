@@ -45,33 +45,30 @@ router.post('/register', async (req, res) => {
       existingUser.name = name.trim();
       existingUser.password = password;
       existingUser.profile = { ...(existingUser.profile?.toObject?.() || existingUser.profile || {}), state: trimmedState };
-      existingUser.emailVerificationToken = verificationToken;
-      existingUser.emailVerificationExpires = verificationExpires;
-      existingUser.emailVerified = false;
+      existingUser.emailVerified = true;
       savedUser = await existingUser.save();
     } else {
       const user = new User({
         name: name.trim(),
         email: normalizedEmail,
         password,
-        emailVerified: false,
-        emailVerificationToken: verificationToken,
-        emailVerificationExpires: verificationExpires,
+        emailVerified: true,
         profile: { state: trimmedState }
       });
       savedUser = await user.save();
     }
 
-    const verificationLink = `${req.protocol}://${req.get('host')}/api/auth/verify-email?token=${verificationToken}`;
-    await emailService.sendVerificationEmail({
-      toEmail: savedUser.email,
-      name: savedUser.name,
-      verificationLink,
-    });
-
+    const token = generateToken(savedUser._id);
     res.status(201).json({
-      requiresEmailVerification: true,
-      message: 'Verification link sent to your email. Please verify before login.',
+      token,
+      user: {
+        id: savedUser._id,
+        name: savedUser.name,
+        email: savedUser.email,
+        role: savedUser.role,
+        profile: savedUser.profile,
+        stats: savedUser.stats
+      }
     });
   } catch (err) {
     console.error('Register error:', err);
@@ -132,10 +129,6 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    if (user.emailVerified === false) {
-      return res.status(403).json({ error: 'Email not verified. Please verify your email first.' });
-    }
-
     const token = generateToken(user._id);
     const responseData = {
       token,
@@ -143,6 +136,7 @@ router.post('/login', async (req, res) => {
         id: user._id,
         name: user.name,
         email: user.email,
+        role: user.role,
         profile: user.profile,
         stats: user.stats
       }

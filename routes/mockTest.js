@@ -1,9 +1,11 @@
 import express from 'express';
 import fs from 'fs';
-import { authenticate } from '../middleware/auth.js';
+import jwt from 'jsonwebtoken';
+import { authenticate, requireAdmin } from '../middleware/auth.js';
 import { uploadPDFs } from '../middleware/upload.js';
 import MockTest from '../models/MockTest.js';
 import TestAttempt from '../models/TestAttempt.js';
+import User from '../models/User.js';
 import {
   extractUPSCVisualMap,
   streamPdfToResponse,
@@ -23,7 +25,6 @@ import { parseQuestions, parseSolutions, mapQuestionsAndSolutions, extractAnswer
 const utapi = new UTApi();
 
 const router = express.Router();
-router.use(authenticate);
 
 const unlinkIfExists = async (filePath) => {
   if (!filePath) return;
@@ -36,15 +37,35 @@ const unlinkIfExists = async (filePath) => {
     }
   }
 };
+
 router.get('/', async (req, res) => {
   try {
     const { subject, year, testType, mode } = req.query;
-    const filter = { userId: req.user._id };
+    const filter = {};
 
     if (subject) filter.subject = subject;
     if (year) filter.year = parseInt(year);
     if (testType) filter.testType = testType;
     if (mode) filter.mode = mode;
+
+    const adminUsers = await User.find({ role: 'admin' }).select('_id');
+    const adminUserIds = adminUsers.map(u => u._id);
+    
+    if (req.headers.authorization) {
+      try {
+        const token = req.headers.authorization.replace('Bearer ', '');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'upsc_secret_key');
+        const currentUserId = decoded.userId;
+        filter.$or = [
+          { userId: { $in: adminUserIds } },
+          { userId: currentUserId }
+        ];
+      } catch (e) {
+        filter.userId = { $in: adminUserIds };
+      }
+    } else {
+      filter.userId = { $in: adminUserIds };
+    }
 
     const tests = await MockTest.find(filter)
       .select('-answerKey')
@@ -55,11 +76,29 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Get unique subjects and years for filtering
+// Get unique subjects and years for filtering (public)
 router.get('/metadata/filters', async (req, res) => {
   try {
-    const subjects = await MockTest.distinct('subject', { userId: req.user._id });
-    const years = await MockTest.distinct('year', { userId: req.user._id });
+    const adminUsers = await User.find({ role: 'admin' }).select('_id');
+    const adminUserIds = adminUsers.map(u => u._id);
+    
+    let filter = { userId: { $in: adminUserIds } };
+    
+    if (req.headers.authorization) {
+      try {
+        const token = req.headers.authorization.replace('Bearer ', '');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'upsc_secret_key');
+        filter.$or = [
+          { userId: { $in: adminUserIds } },
+          { userId: decoded.userId }
+        ];
+      } catch (e) {
+        filter.userId = { $in: adminUserIds };
+      }
+    }
+
+    const subjects = await MockTest.distinct('subject', filter);
+    const years = await MockTest.distinct('year', filter);
 
     res.json({
       subjects: subjects.filter(Boolean).sort(),
@@ -69,6 +108,58 @@ router.get('/metadata/filters', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Public routes - view test details without authentication
+router.get('/:id', async (req, res) => {
+  try {
+    const test = await MockTest.findById(req.params.id)
+      .select('-answerKey')
+      .populate('structuredQuestions');
+
+    if (!test) return res.status(404).json({ error: 'Test not found' });
+    res.json(test);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/:id/pdf', async (req, res) => {
+  try {
+    const test = await MockTest.findById(req.params.id).select('testPdfPath mode');
+    if (!test || !test.testPdfPath) {
+      return res.status(404).json({ error: 'Test PDF not found' });
+    }
+
+    if (test.testPdfPath === 'NOT_APPLICABLE' || test.mode === 'structured') {
+      return res.status(404).json({ error: 'No PDF — this is a structured question bank test. Questions are loaded directly.' });
+    }
+
+    return streamPdfToResponse(test.testPdfPath, req, res);
+  } catch (err) {
+    res.status(500).json({ error: "Could not retrieve PDF" });
+  }
+});
+
+router.get('/:id/status', async (req, res) => {
+  try {
+    const test = await MockTest.findById(req.params.id)
+      .select('status processingError totalQuestions name answerKeyCount questionTextExtractionStatus userId');
+    if (!test) return res.status(404).json({ error: 'Test not found' });
+    res.json({
+      status: test.status,
+      error: test.processingError,
+      answerKeyCount: test.answerKeyCount || 0,
+      totalQuestions: test.totalQuestions,
+      name: test.name,
+      questionTextExtractionStatus: test.questionTextExtractionStatus || 'pending'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// All routes below require authentication
+router.use(authenticate);
 
 router.get('/attempts/all/list', async (req, res) => {
   try {
@@ -156,7 +247,8 @@ router.post('/upload', uploadPDFs, async (req, res) => {
   }
 });
 
-router.post('/upload-structured', async (req, res) => {
+// Admin only - Structured upload
+router.post('/upload-structured', requireAdmin, async (req, res) => {
   const t0 = Date.now();
   try {
     const {
@@ -297,49 +389,6 @@ router.post('/upload-structured', async (req, res) => {
   }
 });
 
-
-
-router.get('/:id/pdf', async (req, res) => {
-  try {
-    const token = req.headers.authorization?.split(' ')[1] || req.query.token;
-    if (!token) return res.status(401).json({ error: 'No token provided' });
-
-    const test = await MockTest.findById(req.params.id).select('testPdfPath mode');
-    if (!test || !test.testPdfPath) {
-      return res.status(404).json({ error: 'Test PDF not found' });
-    }
-
-    // Structured mode tests have no PDF
-    if (test.testPdfPath === 'NOT_APPLICABLE' || test.mode === 'structured') {
-      return res.status(404).json({ error: 'No PDF — this is a structured question bank test. Questions are loaded directly.' });
-    }
-
-    return streamPdfToResponse(test.testPdfPath, req, res);
-
-  } catch (err) {
-    res.status(500).json({ error: "Could not retrieve PDF" });
-  }
-});
-
-
-
-router.get('/:id/status', async (req, res) => {
-  try {
-    const test = await MockTest.findOne({ _id: req.params.id, userId: req.user._id })
-      .select('status processingError totalQuestions name answerKeyCount questionTextExtractionStatus');
-    if (!test) return res.status(404).json({ error: 'Test not found' });
-    res.json({
-      status: test.status,
-      error: test.processingError,
-      answerKeyCount: test.answerKeyCount || 0,
-      totalQuestions: test.totalQuestions,
-      name: test.name,
-      questionTextExtractionStatus: test.questionTextExtractionStatus || 'pending'
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 router.get('/attempts/:attemptId', async (req, res) => {
   try {
     const attempt = await TestAttempt.findOne({ _id: req.params.attemptId, userId: req.user._id })
@@ -356,7 +405,7 @@ router.post('/:id/submit', async (req, res) => {
   try {
     const { userAnswers, timeTakenMinutes } = req.body;
 
-    const mockTest = await MockTest.findOne({ _id: req.params.id, userId: req.user._id });
+    const mockTest = await MockTest.findById(req.params.id);
     if (!mockTest) {
       console.error(`[Submission] Test not found: ${req.params.id} for user: ${req.user._id}`);
       return res.status(404).json({ error: 'Test not found' });
@@ -428,19 +477,6 @@ router.post('/:id/submit', async (req, res) => {
   }
 });
 
-router.get('/:id', async (req, res) => {
-  try {
-    const test = await MockTest.findOne({ _id: req.params.id, userId: req.user._id })
-      .select('-answerKey')
-      .populate('structuredQuestions');
-
-    if (!test) return res.status(404).json({ error: 'Test not found' });
-    res.json(test);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 
 
 router.put('/:id/answer-key', async (req, res) => {
@@ -467,13 +503,12 @@ router.put('/:id/answer-key', async (req, res) => {
   }
 });
 
-
-router.delete('/:id', async (req, res) => {
+// Admin only - Delete any test
+router.delete('/:id', requireAdmin, async (req, res) => {
   try {
-    const test = await MockTest.findOne({ _id: req.params.id, userId: req.user._id });
+    const test = await MockTest.findById(req.params.id);
     if (!test) return res.status(404).json({ error: 'Test not found' });
 
-    // 1. Uploadthing se delete (Using keys)
     const keysToDelete = [];
     if (test.testPdfKey) keysToDelete.push(test.testPdfKey);
     if (test.solutionPdfKey) keysToDelete.push(test.solutionPdfKey);
@@ -482,7 +517,6 @@ router.delete('/:id', async (req, res) => {
       await utapi.deleteFiles(keysToDelete).catch(err => console.error("UT Delete Error:", err));
     }
 
-    // 2. Database cleanup
     await MockTest.findByIdAndDelete(req.params.id);
     await TestAttempt.deleteMany({ mockTestId: req.params.id });
 
@@ -491,6 +525,7 @@ router.delete('/:id', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 
 

@@ -18,6 +18,7 @@ const testSeriesSchema = new mongoose.Schema({
   provider: String,
   type: { type: String, enum: ['prelims', 'mains', 'sectional', 'full_length', 'csat'], required: true },
   totalTests: Number,
+  isActive: { type: Boolean, default: true },
   attempts: [testAttemptSchema],
   nextRecommendedDate: Date,
   createdAt: { type: Date, default: Date.now }

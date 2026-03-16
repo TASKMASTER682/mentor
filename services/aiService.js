@@ -3,6 +3,7 @@ import axios from 'axios';
 import DailyTracker from '../models/DailyTracker.js';
 import Mission from '../models/Mission.js';
 import TestAttempt from '../models/TestAttempt.js'
+import LibrarySource from '../models/LibrarySource.js';
 import { extractUPSCVisualMap, extractTextFromQuestionImage } from './pdfService.js';
 
 
@@ -121,10 +122,37 @@ const fallbackParseSyllabus = (syllabusText = '') => {
 };
 
 export const aiService = {
+  async generateDailyInsight({ tasks, focusScore, mood, energyLevel, completionRate, notesPrepared, topicsNotUnderstood, recentEntries }) {
+    try {
+      const response = await getOpenAIClient().chat.completions.create({
+        model: 'meta/llama-3.1-405b-instruct',
+        messages: [{
+          role: 'user',
+          content: `Generate a brief daily insight (2-3 sentences) for a UPSC aspirant based on:
+- Tasks completed: ${tasks}
+- Focus Score: ${focusScore}/10
+- Mood: ${mood}
+- Energy Level: ${energyLevel}/10
+- Completion Rate: ${completionRate}%
+- Notes Prepared: ${notesPrepared}
+- Topics needing work: ${topicsNotUnderstood}
+- Recent entries: ${JSON.stringify(recentEntries)}
+
+Keep it encouraging and actionable.`
+        }],
+        temperature: 0.7,
+        max_tokens: 150
+      });
+      return response.choices[0].message.content.trim();
+    } catch (err) {
+      console.error('Daily Insight Error:', err.message);
+      return "Great effort today! Keep up the consistent preparation.";
+    }
+  },
   async parseSyllabus(syllabusText, subject) {
     try {
       const response = await getOpenAIClient().chat.completions.create({
-        model: 'yentinglin/llama-3-taiwan-70b-instruct',
+        model: 'meta/llama-3.1-405b-instruct',
         messages: [{
           role: 'user',
           content: `Parse this UPSC syllabus for "${subject}" into a JSON array of chapters: [{"title": string, "estimatedHours": number, "status": "not_started"}].\nText:\n${syllabusText}`
@@ -162,27 +190,111 @@ export const aiService = {
 
   async mentorChat({ message, conversationHistory, user }) {
     try {
+      console.log('[Mentor AI] Starting mentorChat function');
       const userId = user._id;
       const today = new Date();
       today.setUTCHours(0, 0, 0, 0);
-      const [dailyLogs, activeMissions, todayAttempts] = await Promise.all([
-        DailyTracker.find({ userId }).sort({ date: -1 }).limit(3),
+      
+      // Get more comprehensive data
+      const [dailyLogs, activeMissions, recentTests, librarySources] = await Promise.all([
+        DailyTracker.find({ userId }).sort({ date: -1 }).limit(5),
         Mission.find({ userId, status: 'active' }),
-        TestAttempt.find({ userId, submittedAt: { $gte: today } }).sort({ submittedAt: -1 })
+        TestAttempt.find({ userId }).sort({ submittedAt: -1 }).limit(10),
+        LibrarySource.find({ userId }).limit(10)
       ]);
-      const contextSummary = `Student: ${user.name}\nMissions: ${activeMissions.map(m => m.subject).join(',')}\nRecent Logs: ${dailyLogs.length}\nToday Tests: ${todayAttempts.length}`;
-      const response = await getOpenAIClient().chat.completions.create({
-        model: 'yentinglin/llama-3-taiwan-70b-instruct',
+      
+      // Build detailed context
+      const testSummary = recentTests.length > 0 
+        ? `Recent Tests:\n${recentTests.map(t => 
+            `- ${t.testName || 'Test'}: Score ${t.percentage?.toFixed(1) || 'N/A'}% (${t.correctCount} correct, ${t.wrongCount} wrong)`
+          ).join('\n')}`
+        : 'No tests taken yet';
+      
+      const missionSummary = activeMissions.length > 0
+        ? `Active Missions:\n${activeMissions.map(m => 
+            `- ${m.subject}: ${m.completedChapters || 0}/${m.totalChapters || 0} chapters completed`
+          ).join('\n')}`
+        : 'No active missions';
+      
+      const progressSummary = librarySources.length > 0
+        ? `Library Progress:\n${librarySources.map(s => 
+            `- ${s.title} (${s.subject}): ${s.completedChapters || 0}/${s.totalChapters || 0} chapters`
+          ).join('\n')}`
+        : 'No library sources';
+      
+      const dailyLogsSummary = dailyLogs.length > 0
+        ? `Recent Daily Logs:\n${dailyLogs.slice(0, 3).map(d => 
+            `- ${d.date?.toString().slice(0,10)}: Study hours ${d.totalStudyHours || 0}`
+          ).join('\n')}`
+        : 'No daily logs yet';
+      
+      const contextSummary = `STUDENT: ${user.name}
+${testSummary}
+
+${missionSummary}
+
+${progressSummary}
+
+${dailyLogsSummary}
+
+IMPORTANT: Only mention test scores if the user has actually taken tests. If no tests, don't mention scores.`;
+
+      console.log('[Mentor AI] Context summary:', contextSummary.substring(0, 200) + '...');
+      
+      const client = getOpenAIClient();
+      console.log('[Mentor AI] OpenAI client initialized');
+      
+      const response = await client.chat.completions.create({
+        model: 'meta/llama-3.1-405b-instruct',
         messages: [
-          { role: 'system', content: MENTOR_SYSTEM_PROMPT + '\n' + contextSummary },
+          { role: 'system', content: MENTOR_SYSTEM_PROMPT + '\n\nUSER DATA:\n' + contextSummary },
           ...(conversationHistory || []),
           { role: 'user', content: message }
         ],
         temperature: 0.7
       });
+      console.log('[Mentor AI] Response received from NVIDIA');
       return response.choices[0].message.content;
     } catch (err) {
-      return "I'm focusing on your data. Tell me, how was your accuracy today?";
+      console.error('[Mentor AI] NVIDIA API failed:', err.message);
+      console.error('[Mentor AI] NVIDIA API response:', err.response?.data || err.response?.status);
+      
+      // Try Groq as fallback - include context
+      try {
+        console.log('[Mentor AI] Trying Groq fallback...');
+        
+        // Rebuild context for Groq (since we can't access variables from above)
+        const [dailyLogs, activeMissions, recentTests, librarySources] = await Promise.all([
+          DailyTracker.find({ userId: user._id }).sort({ date: -1 }).limit(5),
+          Mission.find({ userId: user._id, status: 'active' }),
+          TestAttempt.find({ userId: user._id }).sort({ submittedAt: -1 }).limit(10),
+          LibrarySource.find({ userId: user._id }).limit(10)
+        ]);
+        
+        const testSummary = recentTests.length > 0 
+          ? `Recent Tests:\n${recentTests.map(t => 
+              `- ${t.testName || 'Test'}: Score ${t.percentage?.toFixed(1) || 'N/A'}%`
+            ).join('\n')}`
+          : 'No tests taken yet';
+        
+        const groqContext = `STUDENT: ${user.name}\n${testSummary}\nActive Missions: ${activeMissions.length}`;
+        
+        const groqClient = getGroqClient();
+        const response = await groqClient.chat.completions.create({
+          model: 'llama-3.3-70b-versatile',
+          messages: [
+            { role: 'system', content: MENTOR_SYSTEM_PROMPT + '\n\nUSER DATA:\n' + groqContext },
+            ...(conversationHistory || []),
+            { role: 'user', content: message }
+          ],
+          temperature: 0.7
+        });
+        console.log('[Mentor AI] Groq fallback succeeded');
+        return response.choices[0].message.content;
+      } catch (groqErr) {
+        console.error('[Mentor AI] Groq also failed:', groqErr.message);
+        return "I'm having trouble accessing your data right now. Tell me, what's your current study focus?";
+      }
     }
   },
 
@@ -238,7 +350,7 @@ INSTRUCTIONS:
       // console.log('[AI Schedule] Prompt length:', prompt.length, '| Missions:', prunedMissions.length);
 
       const response = await getOpenAIClient().chat.completions.create({
-        model: 'yentinglin/llama-3-taiwan-70b-instruct',
+        model: 'meta/llama-3.1-405b-instruct',
         messages: [
           { role: 'system', content: SCHEDULER_SYSTEM_PROMPT },
           { role: 'user', content: prompt }
@@ -332,7 +444,7 @@ REQUIREMENTS:
 5. Analysis must address the user directly: "You confused X with Y. You must read Spectrum Chapter 5 for this."`;
 
       const response = await getOpenAIClient().chat.completions.create({
-        model: 'yentinglin/llama-3-taiwan-70b-instruct',
+        model: 'meta/llama-3.1-405b-instruct',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: `Analyze this UPSC Attempt for ${user.name}: ${JSON.stringify(payload)}` }
@@ -598,7 +710,5 @@ Return ONLY the raw HTML string without markdown code blocks.`
       console.error('AI Complex Formatting Error:', err);
       return null;
     }
-}
+  }
 };
-
-'Wrap the header in text-white font-bold text-lg mb-4. Wrap statements in a bg-slate-800/40 p-4 rounded border-l-4 border-yellow-500 container. Use text-yellow-400 font-bold for numbering (1, 2, 3). Ensure the tail instruction is italic text-gray-300 mt-4 pt-2 border-t border-gray-700'

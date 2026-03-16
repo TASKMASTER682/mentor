@@ -87,4 +87,120 @@ router.post('/refine', async (req, res) => {
   }
 });
 
+router.patch('/block/:blockIndex/complete', async (req, res) => {
+  try {
+    const { blockIndex } = req.params;
+    const { timeSpent } = req.body; // minutes spent
+    
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    
+    const schedule = await Schedule.findOne({ userId: req.user._id, date: today });
+    if (!schedule) {
+      return res.status(404).json({ error: 'No schedule found for today' });
+    }
+    
+    const index = parseInt(blockIndex);
+    if (isNaN(index) || index < 0 || index >= schedule.blocks.length) {
+      return res.status(400).json({ error: 'Invalid block index' });
+    }
+    
+    schedule.blocks[index].completed = true;
+    schedule.blocks[index].completedAt = new Date();
+    if (timeSpent) {
+      schedule.blocks[index].timeSpent = timeSpent;
+    }
+    
+    await schedule.save();
+    
+    res.json({
+      success: true,
+      block: schedule.blocks[index],
+      completedCount: schedule.blocks.filter(b => b.completed).length,
+      totalBlocks: schedule.blocks.length
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/block/:blockIndex/incomplete', async (req, res) => {
+  try {
+    const { blockIndex } = req.params;
+    
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    
+    const schedule = await Schedule.findOne({ userId: req.user._id, date: today });
+    if (!schedule) {
+      return res.status(404).json({ error: 'No schedule found for today' });
+    }
+    
+    const index = parseInt(blockIndex);
+    if (isNaN(index) || index < 0 || index >= schedule.blocks.length) {
+      return res.status(400).json({ error: 'Invalid block index' });
+    }
+    
+    schedule.blocks[index].completed = false;
+    schedule.blocks[index].completedAt = null;
+    schedule.blocks[index].timeSpent = 0;
+    schedule.blocks[index].timerStartedAt = null;
+    
+    await schedule.save();
+    
+    res.json({
+      success: true,
+      block: schedule.blocks[index],
+      completedCount: schedule.blocks.filter(b => b.completed).length,
+      totalBlocks: schedule.blocks.length
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/block/:blockIndex/timer', async (req, res) => {
+  try {
+    const { blockIndex } = req.params;
+    const { action } = req.body; // 'start' or 'stop'
+    
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    
+    const schedule = await Schedule.findOne({ userId: req.user._id, date: today });
+    if (!schedule) {
+      return res.status(404).json({ error: 'No schedule found for today' });
+    }
+    
+    const index = parseInt(blockIndex);
+    if (isNaN(index) || index < 0 || index >= schedule.blocks.length) {
+      return res.status(400).json({ error: 'Invalid block index' });
+    }
+    
+    const block = schedule.blocks[index];
+    
+    if (action === 'start') {
+      block.timerStartedAt = new Date();
+    } else if (action === 'stop') {
+      if (block.timerStartedAt) {
+        const elapsed = Math.round((new Date().getTime() - block.timerStartedAt.getTime()) / 60000);
+        block.timeSpent = (block.timeSpent || 0) + elapsed;
+        block.timerStartedAt = null;
+      }
+    }
+    
+    await schedule.save();
+    
+    res.json({
+      success: true,
+      block,
+      elapsedMinutes: block.timerStartedAt 
+        ? Math.round((new Date().getTime() - new Date(block.timerStartedAt).getTime()) / 60000)
+        : null
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;

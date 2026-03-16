@@ -1,10 +1,12 @@
 
 
+import dotenv from 'dotenv';
+dotenv.config();
+
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import cron from 'node-cron';
 
@@ -18,9 +20,9 @@ import mentorRoutes from './routes/mentor.js';
 import testRoutes from './routes/tests.js';
 import mockTestRoutes from './routes/mockTest.js';          // NEW
 import ddayRoutes from './routes/dday.js';
+import adminRoutes from './routes/admin.js';
+import youtubeCourseRoutes from './routes/youtubeCourse.js';
 import { schedulerService } from './services/schedulerService.js';
-
-dotenv.config();
 
 const app = express();
 const httpServer = createServer(app);
@@ -43,6 +45,8 @@ app.use('/api/mentor', mentorRoutes);
 app.use('/api/tests', testRoutes);
 app.use('/api/mock-tests', mockTestRoutes);                 // NEW
 app.use('/api/d-day', ddayRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/youtube-courses', youtubeCourseRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date() }));
 
