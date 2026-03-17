@@ -37,7 +37,6 @@ router.post('/generate', async (req, res) => {
     const dateStr = req.body?.date;
     const now = new Date();
     const startMinutes = (now.getHours() * 60) + now.getMinutes();
-    console.log('[Schedule Generate] Current time minutes:', startMinutes, '| Date:', dateStr);
     if (startMinutes >= (23 * 60 + 45)) {
       return res.status(400).json({ error: 'Schedule can be generated only before 11:45 PM for today.' });
     }

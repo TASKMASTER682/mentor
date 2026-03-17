@@ -138,14 +138,6 @@ export const schedulerService = {
         name: user.name
       };
 
-      console.log('[Scheduler] Calling AI with:', {
-        hasUser: !!prunedUser,
-        activeMissionsCount: activeMissions.length,
-        sourcesCount: sources.length,
-        recentEntriesCount: recentEntries.length,
-        window: effectiveWindow
-      });
-      
       const blocks = await aiService.generateSchedule({
         user: prunedUser, sources, activeMissions, recentEntries,
         avoidedSubjects: allWeakSubjects,

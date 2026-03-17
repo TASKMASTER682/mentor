@@ -12,15 +12,11 @@ router.post('/chat', async (req, res) => {
     const { message, conversationHistory } = req.body;
     const user = req.user;
     
-    console.log('[Mentor] Chat request received, message:', message?.substring(0, 50));
-    
     const [recentEntries, activeMissions, sources] = await Promise.all([
       DailyTracker.find({ userId: user._id }).sort({ date: -1 }).limit(7),
       Mission.find({ userId: user._id, status: 'active' }),
       LibrarySource.find({ userId: user._id })
     ]);
-
-    console.log('[Mentor] Context loaded - Entries:', recentEntries.length, 'Missions:', activeMissions.length);
 
     const response = await aiService.mentorChat({
       message,
@@ -33,7 +29,6 @@ router.post('/chat', async (req, res) => {
       }
     });
 
-    console.log('[Mentor] Response received successfully');
     res.json({ response });
   } catch (err) {
     console.error('[Mentor] Chat Error:', err.message, err.stack);

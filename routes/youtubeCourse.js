@@ -61,22 +61,31 @@ function parseDurationToSeconds(isoDuration) {
 
 async function fetchVideoDetails(videoIds) {
   const YOUTUBE_API_KEY = getYouTubeApiKey();
-  const response = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
-    params: {
-      part: 'snippet,contentDetails',
-      id: videoIds.join(','),
-      key: YOUTUBE_API_KEY
-    }
-  });
+  const results = [];
   
-  return response.data.items.map(item => ({
-    videoId: item.id,
-    title: item.snippet.title,
-    description: item.snippet.description,
-    thumbnail: item.snippet.thumbnails?.medium?.url || item.snippet.thumbnails?.default?.url,
-    duration: formatDuration(item.contentDetails.duration),
-    durationSeconds: parseDurationToSeconds(item.contentDetails.duration)
-  }));
+  // YouTube API allows max 50 video IDs per request
+  const batchSize = 50;
+  for (let i = 0; i < videoIds.length; i += batchSize) {
+    const batch = videoIds.slice(i, i + batchSize);
+    const response = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
+      params: {
+        part: 'snippet,contentDetails',
+        id: batch.join(','),
+        key: YOUTUBE_API_KEY
+      }
+    });
+    
+    results.push(...response.data.items.map(item => ({
+      videoId: item.id,
+      title: item.snippet.title,
+      description: item.snippet.description,
+      thumbnail: item.snippet.thumbnails?.medium?.url || item.snippet.thumbnails?.default?.url,
+      duration: formatDuration(item.contentDetails.duration),
+      durationSeconds: parseDurationToSeconds(item.contentDetails.duration)
+    })));
+  }
+  
+  return results;
 }
 
 async function fetchPlaylistItems(playlistId) {

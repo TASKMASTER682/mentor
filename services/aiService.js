@@ -6,6 +6,8 @@ import TestAttempt from '../models/TestAttempt.js'
 import LibrarySource from '../models/LibrarySource.js';
 import { extractUPSCVisualMap, extractTextFromQuestionImage } from './pdfService.js';
 
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
 
 let groq = null;
 const getGroqClient = () => {
@@ -149,6 +151,79 @@ Keep it encouraging and actionable.`
       return "Great effort today! Keep up the consistent preparation.";
     }
   },
+  async generateMissionStrategy({ title, subject, chapters, daysAvailable, dailyHours, userProfile }) {
+    try {
+      const response = await getOpenAIClient().chat.completions.create({
+        model: 'meta/llama-3.1-405b-instruct',
+        messages: [{
+          role: 'user',
+          content: `Generate a mission strategy for UPSC preparation:
+- Title: ${title}
+- Subject: ${subject}
+- Chapters to cover: ${chapters.map(c => c.title).join(', ')}
+- Days available: ${daysAvailable}
+- Hours per day: ${dailyHours}
+- User profile: ${JSON.stringify(userProfile)}
+
+Generate a JSON strategy with: priority (high/medium/low), approach (string describing the study strategy), tips (array of 3-4 practical tips).`
+        }],
+        temperature: 0.7,
+        max_tokens: 300
+      });
+      const text = response.choices[0].message.content.trim();
+      const match = text.match(/\{[\s\S]*\}/);
+      return match ? JSON.parse(match[0]) : { priority: 'medium', approach: 'Focus on completing chapters systematically', tips: ['Start with important topics', 'Revise regularly', 'Practice answer writing'] };
+    } catch (err) {
+      console.error('Mission Strategy Error:', err.message);
+      return { priority: 'medium', approach: 'Focus on completing chapters systematically', tips: ['Start with important topics', 'Revise regularly', 'Practice answer writing'] };
+    }
+  },
+  async calculateConfidenceScore(recentData) {
+    try {
+      const { trackerEntries, scheduleStats } = recentData;
+      const avgCompletion = trackerEntries.length > 0
+        ? Math.round(trackerEntries.reduce((sum, e) => sum + (Number(e.completionRate) || 0), 0) / trackerEntries.length)
+        : 0;
+      const avgFocus = trackerEntries.length > 0
+        ? Math.round(trackerEntries.reduce((sum, e) => sum + (Number(e.focusScore) || 0), 0) / trackerEntries.length)
+        : 0;
+      const avgEnergy = trackerEntries.length > 0
+        ? Math.round(trackerEntries.reduce((sum, e) => sum + (Number(e.energyLevel) || 0), 0) / trackerEntries.length)
+        : 0;
+      const scheduleCompletion = scheduleStats.length > 0
+        ? Math.round(scheduleStats.reduce((sum, s) => sum + (s.completedBlocks / s.totalBlocks), 0) / scheduleStats.length * 100)
+        : 0;
+      const totalHoursSpent = scheduleStats.reduce((sum, s) => sum + (s.totalTimeSpent || 0), 0);
+
+      const response = await getOpenAIClient().chat.completions.create({
+        model: 'meta/llama-3.1-405b-instruct',
+        messages: [{
+          role: 'user',
+          content: `Calculate a confidence score (0-100) for a UPSC aspirant based on:
+- Average Daily Completion Rate: ${avgCompletion}%
+- Average Focus Score: ${avgFocus}/10
+- Average Energy Level: ${avgEnergy}/10
+- Schedule Completion Rate: ${scheduleCompletion}%
+- Total Study Hours This Week: ${totalHoursSpent} minutes (${Math.round(totalHoursSpent/60)} hours)
+
+Consider:
+- Consistency over time
+- Quality of focus and energy
+- Progress on scheduled tasks
+- Total effort invested
+
+Return ONLY a number between 0-100. No explanation.`
+        }],
+        temperature: 0.3,
+        max_tokens: 10
+      });
+      const score = parseInt(response.choices[0].message.content.trim());
+      return isNaN(score) ? null : clamp(score, 0, 100);
+    } catch (err) {
+      console.error('AI Confidence Calculation Error:', err.message);
+      return null;
+    }
+  },
   async parseSyllabus(syllabusText, subject) {
     try {
       const response = await getOpenAIClient().chat.completions.create({
@@ -190,7 +265,6 @@ Keep it encouraging and actionable.`
 
   async mentorChat({ message, conversationHistory, user }) {
     try {
-      console.log('[Mentor AI] Starting mentorChat function');
       const userId = user._id;
       const today = new Date();
       today.setUTCHours(0, 0, 0, 0);
@@ -239,10 +313,7 @@ ${dailyLogsSummary}
 
 IMPORTANT: Only mention test scores if the user has actually taken tests. If no tests, don't mention scores.`;
 
-      console.log('[Mentor AI] Context summary:', contextSummary.substring(0, 200) + '...');
-      
       const client = getOpenAIClient();
-      console.log('[Mentor AI] OpenAI client initialized');
       
       const response = await client.chat.completions.create({
         model: 'meta/llama-3.1-405b-instruct',
@@ -253,7 +324,6 @@ IMPORTANT: Only mention test scores if the user has actually taken tests. If no 
         ],
         temperature: 0.7
       });
-      console.log('[Mentor AI] Response received from NVIDIA');
       return response.choices[0].message.content;
     } catch (err) {
       console.error('[Mentor AI] NVIDIA API failed:', err.message);
@@ -261,8 +331,6 @@ IMPORTANT: Only mention test scores if the user has actually taken tests. If no 
       
       // Try Groq as fallback - include context
       try {
-        console.log('[Mentor AI] Trying Groq fallback...');
-        
         // Rebuild context for Groq (since we can't access variables from above)
         const [dailyLogs, activeMissions, recentTests, librarySources] = await Promise.all([
           DailyTracker.find({ userId: user._id }).sort({ date: -1 }).limit(5),
@@ -289,7 +357,6 @@ IMPORTANT: Only mention test scores if the user has actually taken tests. If no 
           ],
           temperature: 0.7
         });
-        console.log('[Mentor AI] Groq fallback succeeded');
         return response.choices[0].message.content;
       } catch (groqErr) {
         console.error('[Mentor AI] Groq also failed:', groqErr.message);

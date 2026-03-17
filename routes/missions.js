@@ -64,7 +64,7 @@ router.post('/', async (req, res) => {
       totalChapters: allChapters.length, dailyPlan,
       totalHoursNeeded, dailyHoursRequired: availableHoursPerDay,
       priority: activeMissions + 1, warningIssued: !!warning,
-      aiStrategy: strategy
+      aiStrategy: JSON.stringify(strategy)
     });
 
     await mission.save();
