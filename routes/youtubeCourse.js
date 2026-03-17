@@ -126,14 +126,21 @@ router.get('/', async (req, res) => {
     
     const coursesWithProgress = courses.map(course => {
       const progress = progressList.find(p => p.courseId.toString() === course._id.toString());
+      if (progress) {
+        const progressObj = progress.toObject({ virtuals: true });
+        return {
+          ...course.toObject(),
+          progress: {
+            percentage: progressObj.progressPercentage,
+            completedVideos: progressObj.completedVideos,
+            totalVideos: course.videos.length,
+            lastWatchedVideoId: progressObj.lastWatchedVideoId
+          }
+        };
+      }
       return {
         ...course.toObject(),
-        progress: progress ? {
-          percentage: progress.progressPercentage,
-          completedVideos: progress.completedVideos,
-          totalVideos: course.videos.length,
-          lastWatchedVideoId: progress.lastWatchedVideoId
-        } : null
+        progress: null
       };
     });
     
@@ -266,7 +273,22 @@ router.get('/:id', async (req, res) => {
     
     const progress = await UserCourseProgress.findOne({ courseId: course._id, userId: req.user._id });
     
-    res.json({ course, progress });
+    if (progress) {
+      const progressObj = progress.toObject({ virtuals: true });
+      res.json({ 
+        course, 
+        progress: {
+          percentage: progressObj.progressPercentage,
+          completedVideos: progressObj.completedVideos,
+          videos: progressObj.videos,
+          lastWatchedVideoId: progressObj.lastWatchedVideoId,
+          lastWatchedAt: progressObj.lastWatchedAt,
+          completedAt: progressObj.completedAt
+        }
+      });
+    } else {
+      res.json({ course, progress: null });
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -315,12 +337,17 @@ router.patch('/:id/video/:videoId/complete', async (req, res) => {
     await progress.save();
     
     const updatedCourse = await YouTubeCourse.findById(course._id);
+    const progressObj = progress.toObject({ virtuals: true });
     
     res.json({
       progress: {
-        percentage: progress.progressPercentage,
-        completedVideos: progress.completedVideos,
-        totalVideos: progress.videos.length
+        percentage: progressObj.progressPercentage,
+        completedVideos: progressObj.completedVideos,
+        videos: progressObj.videos,
+        lastWatchedVideoId: progressObj.lastWatchedVideoId,
+        lastWatchedAt: progressObj.lastWatchedAt,
+        completedAt: progressObj.completedAt,
+        totalVideos: progressObj.videos.length
       },
       course: updatedCourse
     });
@@ -346,11 +373,15 @@ router.patch('/:id/video/:videoId/incomplete', async (req, res) => {
     
     await progress.save();
     
+    const progressObj = progress.toObject({ virtuals: true });
+    
     res.json({
       progress: {
-        percentage: progress.progressPercentage,
-        completedVideos: progress.completedVideos,
-        totalVideos: progress.videos.length
+        percentage: progressObj.progressPercentage,
+        completedVideos: progressObj.completedVideos,
+        videos: progressObj.videos,
+        lastWatchedVideoId: progressObj.lastWatchedVideoId,
+        totalVideos: progressObj.videos.length
       }
     });
   } catch (err) {
