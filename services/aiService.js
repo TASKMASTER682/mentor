@@ -8,7 +8,6 @@ import { extractUPSCVisualMap, extractTextFromQuestionImage } from './pdfService
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
-
 let groq = null;
 const getGroqClient = () => {
   if (!groq) {
@@ -555,8 +554,6 @@ REQUIREMENTS:
       const maxToAnalyze = 15;
       const subset = (wrongQuestions || []).slice(0, maxToAnalyze);
       const deepAnalysis = [];
-
-      // console.log(`[Arjun AI] Analyzing ${subset.length} wrong questions...`);
 
       for (const wq of subset) {
         try {
