@@ -1,59 +1,46 @@
 import express from 'express';
-import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
 import PDF from '../models/PDF.js';
 import LibrarySource from '../models/LibrarySource.js';
 import { authenticate } from '../middleware/auth.js';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+import { UTApi } from 'uploadthing/server';
+import { File } from 'node:buffer';
 
 const router = express.Router();
+const utapi = new UTApi({ token: process.env.UPLOADTHING_TOKEN });
 
-const uploadsDir = path.join(__dirname, '..', 'uploads', 'pdfs');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadsDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueName = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}${path.extname(file.originalname)}`;
-    cb(null, uniqueName);
-  },
-});
-
-const upload = multer({
-  storage,
-  limits: { fileSize: 100 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/pdf') {
-      cb(null, true);
-    } else {
-      cb(new Error('Only PDF files are allowed'));
-    }
-  },
-});
-
-router.post('/upload', authenticate, upload.single('pdf'), async (req, res) => {
+router.post('/upload', authenticate, async (req, res) => {
   try {
-    if (!req.file) {
+    const { name, subject, year, fileName, fileData, fileSize } = req.body;
+
+    if (!fileData) {
       return res.status(400).json({ message: 'No file uploaded' });
+    }
+
+    if (fileSize > 20 * 1024 * 1024) {
+      return res.status(400).json({ message: 'File too large. Max 20MB allowed' });
+    }
+
+    console.log('[PDF Upload] File:', fileName, 'Size:', fileSize);
+
+    const buffer = Buffer.from(fileData, 'base64');
+    const pdfFile = new File([buffer], fileName || 'document.pdf', { type: 'application/pdf' });
+
+    const uploadResponse = await utapi.uploadFiles([pdfFile]);
+    const uploadResult = uploadResponse[0];
+
+    if (!uploadResult.data) {
+      console.error('[PDF Upload] UploadThing failed:', uploadResult.error);
+      return res.status(500).json({ message: 'Upload failed' });
     }
 
     const pdf = new PDF({
       userId: req.user._id,
-      name: req.body.name || req.file.originalname.replace(/\.pdf$/i, ''),
-      subject: req.body.subject,
-      year: req.body.year,
-      fileName: req.file.originalname,
-      filePath: `/uploads/pdfs/${req.file.filename}`,
-      fileSize: req.file.size,
+      name: name || fileName?.replace(/\.pdf$/i, ''),
+      subject,
+      year,
+      fileName: fileName || 'document.pdf',
+      filePath: uploadResult.data.ufsUrl,
+      fileSize,
     });
 
     await pdf.save();
@@ -66,8 +53,7 @@ router.post('/upload', authenticate, upload.single('pdf'), async (req, res) => {
 
 router.get('/', authenticate, async (req, res) => {
   try {
-    const pdfs = await PDF.find({ userId: req.user._id })
-      .sort({ createdAt: -1 });
+    const pdfs = await PDF.find({ userId: req.user._id }).sort({ createdAt: -1 });
     res.json(pdfs);
   } catch (error) {
     console.error('Error fetching PDFs:', error);
@@ -88,15 +74,8 @@ router.get('/subjects', authenticate, async (req, res) => {
 
 router.get('/:id', authenticate, async (req, res) => {
   try {
-    const pdf = await PDF.findOne({ 
-      _id: req.params.id, 
-      userId: req.user._id 
-    });
-    
-    if (!pdf) {
-      return res.status(404).json({ message: 'PDF not found' });
-    }
-    
+    const pdf = await PDF.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!pdf) return res.status(404).json({ message: 'PDF not found' });
     res.json(pdf);
   } catch (error) {
     console.error('Error fetching PDF:', error);
@@ -106,26 +85,14 @@ router.get('/:id', authenticate, async (req, res) => {
 
 router.get('/:id/file', authenticate, async (req, res) => {
   try {
-    const pdf = await PDF.findOne({ 
-      _id: req.params.id, 
-      userId: req.user._id 
-    });
-    
-    if (!pdf) {
-      return res.status(404).json({ message: 'PDF not found' });
+    const pdf = await PDF.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!pdf) return res.status(404).json({ message: 'PDF not found' });
+
+    if (pdf.filePath.startsWith('http')) {
+      return res.redirect(pdf.filePath);
     }
 
-    const filePath = path.join(__dirname, '..', pdf.filePath);
-    
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ message: 'File not found' });
-    }
-
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${pdf.fileName}"`);
-    
-    const fileStream = fs.createReadStream(filePath);
-    fileStream.pipe(res);
+    return res.status(404).json({ message: 'File not found' });
   } catch (error) {
     console.error('Error serving PDF:', error);
     res.status(500).json({ message: 'Failed to serve PDF' });
@@ -135,10 +102,9 @@ router.get('/:id/file', authenticate, async (req, res) => {
 router.patch('/:id/progress', authenticate, async (req, res) => {
   try {
     const { totalTimeSpent, lastReadDate, lastPageRead, isCompleted, averageReadingSpeed } = req.body;
-    
     const pdf = await PDF.findOneAndUpdate(
       { _id: req.params.id, userId: req.user._id },
-      { 
+      {
         ...(totalTimeSpent !== undefined && { totalTimeSpent }),
         ...(lastReadDate && { lastReadDate }),
         ...(lastPageRead && { lastPageRead }),
@@ -147,11 +113,7 @@ router.patch('/:id/progress', authenticate, async (req, res) => {
       },
       { new: true }
     );
-    
-    if (!pdf) {
-      return res.status(404).json({ message: 'PDF not found' });
-    }
-    
+    if (!pdf) return res.status(404).json({ message: 'PDF not found' });
     res.json(pdf);
   } catch (error) {
     console.error('Error updating PDF progress:', error);
@@ -161,18 +123,16 @@ router.patch('/:id/progress', authenticate, async (req, res) => {
 
 router.delete('/:id', authenticate, async (req, res) => {
   try {
-    const pdf = await PDF.findOne({ 
-      _id: req.params.id, 
-      userId: req.user._id 
-    });
-    
-    if (!pdf) {
-      return res.status(404).json({ message: 'PDF not found' });
-    }
+    const pdf = await PDF.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!pdf) return res.status(404).json({ message: 'PDF not found' });
 
-    const filePath = path.join(__dirname, '..', pdf.filePath);
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
+    if (pdf.filePath.includes('uploadthing')) {
+      try {
+        const key = pdf.filePath.split('/').pop();
+        await utapi.deleteFiles(key);
+      } catch (e) {
+        console.error('Failed to delete from UploadThing:', e);
+      }
     }
 
     await PDF.findByIdAndDelete(req.params.id);
