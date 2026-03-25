@@ -18,10 +18,12 @@ import trackerRoutes from './routes/tracker.js';
 import scheduleRoutes from './routes/schedule.js';
 import mentorRoutes from './routes/mentor.js';
 import testRoutes from './routes/tests.js';
-import mockTestRoutes from './routes/mockTest.js';          // NEW
+import mockTestRoutes from './routes/mockTest.js';
 import ddayRoutes from './routes/dday.js';
 import adminRoutes from './routes/admin.js';
 import youtubeCourseRoutes from './routes/youtubeCourse.js';
+import pdfsRoutes from './routes/pdfs.js';
+import pdfReaderRoutes from './routes/pdfReader.js';
 import { schedulerService } from './services/schedulerService.js';
 
 const app = express();
@@ -31,8 +33,9 @@ const io = new Server(httpServer, {
 });
 
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000' }));
-app.use(express.json({ limit: '50mb' }));                   // CHANGED: was 10mb
+app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true }));
+app.use('/uploads', express.static('uploads'));
 
 app.use((req, res, next) => { req.io = io; next(); });
 app.use('/api/auth', authRoutes);
@@ -47,6 +50,8 @@ app.use('/api/mock-tests', mockTestRoutes);                 // NEW
 app.use('/api/d-day', ddayRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/youtube-courses', youtubeCourseRoutes);
+app.use('/api/pdfs', pdfsRoutes);
+app.use('/api/pdf-reader', pdfReaderRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date() }));
 
