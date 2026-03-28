@@ -9,7 +9,15 @@ export function calculateScore(userAnswers, answerKey, marking = UPSC_MARKS) {
   let wrongCount = 0;
   let unattemptedCount = 0;
   let totalScore = 0;
-  const keyMap = answerKey instanceof Map ? Object.fromEntries(answerKey) : answerKey;
+  // Handle Map, plain object, or convert Map to object
+  let keyMap = answerKey;
+  if (answerKey instanceof Map) {
+    keyMap = Object.fromEntries(answerKey);
+  } else if (typeof answerKey === 'object' && answerKey !== null) {
+    keyMap = answerKey;
+  } else {
+    keyMap = {};
+  }
   for (const [qNumStr, userAns] of Object.entries(userAnswers)) {
     const correctAns = keyMap[qNumStr] || keyMap[parseInt(qNumStr)];
     let isCorrect = null;

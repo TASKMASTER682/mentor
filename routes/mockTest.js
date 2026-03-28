@@ -311,47 +311,8 @@ router.post('/upload-structured', requireAdmin, async (req, res) => {
       return res.status(400).json({ error: "No valid questions with correct answers were found." });
     }
 
-    // 3. BULK UPSERT — single MongoDB call instead of N sequential calls
-    const t1 = Date.now();
-    const bulkOps = validQuestions.map(q => ({
-      updateOne: {
-        filter: { text: q.text },           // find by exact text (dedup)
-        update: {
-          $setOnInsert: {           // only insert if new
-            questionNumber: q.questionNumber,
-            text: q.text,
-            options: q.options,
-            correctAnswer: q.correctAnswer,
-            explanation: q.explanation,
-            subject: q.subject,
-            year: q.year
-          }
-        },
-        upsert: true
-      }
-    }));
-
-    const bulkResult = await Question.bulkWrite(bulkOps, { ordered: false });
-    // console.log(`[Structured Upload] bulkWrite done in ${Date.now() - t1}ms — inserted: ${bulkResult.upsertedCount}, existing: ${bulkResult.matchedCount}`);
-
-    // 4. Fetch the IDs (both new and existing)
-    const questionTexts = validQuestions.map(q => q.text);
-    const savedQuestions = await Question.find({ text: { $in: questionTexts } }).select('_id text questionNumber');
-
-    // Build answer key map
-    const textToQ = new Map(validQuestions.map(q => [q.text, q]));
-    const questionIds = [];
-    const answerKeyMap = new Map();
-
-    for (const savedQ of savedQuestions) {
-      const original = textToQ.get(savedQ.text);
-      if (original) {
-        questionIds.push(savedQ._id);
-        answerKeyMap.set(String(original.questionNumber), original.correctAnswer);
-      }
-    }
-
-    // 5. Create MockTest record
+    // 3. First create MockTest to get its ID (needed for question linking)
+    const answerKeyObject = {};
     const mockTest = new MockTest({
       userId: req.user._id,
       testSeriesId: testSeriesId || null,
@@ -364,15 +325,62 @@ router.post('/upload-structured', requireAdmin, async (req, res) => {
       markCorrect: markCorrect || 2.0,
       markWrong: markWrong || -0.66,
       mode: 'structured',
-      structuredQuestions: questionIds,
-      answerKey: answerKeyMap,
-      answerKeyCount: answerKeyMap.size,
+      structuredQuestions: [],
+      answerKey: {},
+      answerKeyCount: 0,
       status: 'ready',
       questionTextExtractionStatus: 'completed',
       testPdfPath: "NOT_APPLICABLE"
     });
-
     await mockTest.save();
+    
+    const mockTestId = mockTest._id;
+
+    // 4. BULK UPSERT — single MongoDB call with mockTestId linking
+    const t1 = Date.now();
+    const bulkOps = validQuestions.map(q => ({
+      updateOne: {
+        filter: { text: q.text },           // find by exact text (dedup)
+        update: {
+          $setOnInsert: {           // only insert if new
+            questionNumber: q.questionNumber,
+            text: q.text,
+            options: q.options,
+            correctAnswer: q.correctAnswer,
+            explanation: q.explanation,
+            subject: q.subject,
+            year: q.year,
+            mockTestId: mockTestId
+          }
+        },
+        upsert: true
+      }
+    }));
+
+    await Question.bulkWrite(bulkOps, { ordered: false });
+
+    // 5. Fetch the IDs (both new and existing)
+    const questionTexts = validQuestions.map(q => q.text);
+    const savedQuestions = await Question.find({ text: { $in: questionTexts } }).select('_id text questionNumber');
+
+    // Build answer key map and update question IDs
+    const textToQ = new Map(validQuestions.map(q => [q.text, q]));
+    const questionIds = [];
+
+    for (const savedQ of savedQuestions) {
+      const original = textToQ.get(savedQ.text);
+      if (original) {
+        questionIds.push(savedQ._id);
+        answerKeyObject[String(original.questionNumber)] = original.correctAnswer;
+      }
+    }
+
+    // 6. Update MockTest with question IDs and answer key
+    await MockTest.findByIdAndUpdate(mockTestId, {
+      structuredQuestions: questionIds,
+      answerKey: answerKeyObject,
+      answerKeyCount: Object.keys(answerKeyObject).length
+    });
 
     console.log(`[Structured Upload] DONE — ${validQuestions.length} questions, total time: ${Date.now() - t0}ms`);
 
@@ -485,19 +493,23 @@ router.put('/:id/answer-key', async (req, res) => {
     if (!test) return res.status(404).json({ error: 'Test not found' });
 
     const answerKeyData = req.body; // Expecting {"1": "A", "2": "B", ...}
-    const answerKeyMap = new Map(Object.entries(answerKeyData));
+    // Store as plain object instead of Map for consistency
+    const answerKeyObject = {};
+    Object.entries(answerKeyData).forEach(([k, v]) => {
+      answerKeyObject[String(k)] = String(v).toUpperCase();
+    });
 
     await MockTest.updateOne(
       { _id: req.params.id },
       {
         $set: {
-          answerKey: answerKeyMap,
-          answerKeyCount: answerKeyMap.size
+          answerKey: answerKeyObject,
+          answerKeyCount: Object.keys(answerKeyObject).length
         }
       }
     );
 
-    res.json({ success: true, answerKeyCount: answerKeyMap.size });
+    res.json({ success: true, answerKeyCount: Object.keys(answerKeyObject).length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -517,11 +529,55 @@ router.delete('/:id', requireAdmin, async (req, res) => {
       await utapi.deleteFiles(keysToDelete).catch(err => console.error("UT Delete Error:", err));
     }
 
+    // Delete ALL structured questions linked to this test (no sharing check)
+    if (test.mode === 'structured' && test.structuredQuestions && test.structuredQuestions.length > 0) {
+      const questionIds = test.structuredQuestions.map(id => id.toString());
+      await Question.deleteMany({ _id: { $in: questionIds } });
+      console.log(`[Delete] Deleted ${questionIds.length} questions from Question collection`);
+    }
+
     await MockTest.findByIdAndDelete(req.params.id);
     await TestAttempt.deleteMany({ mockTestId: req.params.id });
 
     res.json({ success: true, message: "Deleted from Cloud and DB" });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin only - Cleanup orphaned questions (not linked to any mock test)
+router.post('/cleanup-questions', requireAdmin, async (req, res) => {
+  try {
+    // Get all question IDs used in structuredQuestions arrays
+    const allTests = await MockTest.find({ mode: 'structured' }).select('structuredQuestions');
+    const usedQuestionIds = new Set();
+    
+    allTests.forEach(test => {
+      if (test.structuredQuestions) {
+        test.structuredQuestions.forEach(qId => {
+          usedQuestionIds.add(qId.toString());
+        });
+      }
+    });
+
+    // Find questions NOT in any mock test
+    const allQuestions = await Question.find({}).select('_id');
+    const orphanedQuestions = allQuestions.filter(q => !usedQuestionIds.has(q._id.toString()));
+
+    const orphanedCount = orphanedQuestions.length;
+    
+    if (orphanedCount > 0) {
+      await Question.deleteMany({ _id: { $in: orphanedQuestions.map(q => q._id) } });
+    }
+
+    console.log(`[Cleanup] Deleted ${orphanedCount} orphaned questions`);
+    res.json({ 
+      success: true, 
+      deletedCount: orphanedCount,
+      remainingQuestions: allQuestions.length - orphanedCount
+    });
+  } catch (err) {
+    console.error('[Cleanup] Error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -547,7 +603,27 @@ async function processTestAndAnswerKey(mockTestId, testPdfPath, solutionPdfPath,
 
     // --- STEP 3: Extract Answer Key from Solution PDF (AI-based) ---
     console.log("[Visual] Extracting answer key...");
-    const { regexParsed, answerKeySection } = await extractAnswerKeyFromSolutionPdf(solutionPdfPath);
+    let regexParsed = {};
+    let answerKeySection = '';
+    
+    try {
+      const result = await extractAnswerKeyFromSolutionPdf(solutionPdfPath);
+      regexParsed = result.regexParsed;
+      answerKeySection = result.answerKeySection;
+    } catch (extractErr) {
+      if (extractErr.message === 'VISION_MODEL_NOT_SUPPORTED') {
+        console.log("[Visual] Vision API failed, using regex fallback...");
+        // Read solution PDF text directly for regex parsing
+        const fs = await import('fs');
+        const { extractAnswersRegex } = await import('../utils/parser.js');
+        const solutionText = fs.readFileSync(solutionPdfPath, 'utf-8').substring(0, 50000);
+        regexParsed = extractAnswersRegex(solutionText);
+        answerKeySection = Object.entries(regexParsed).slice(0, 50).map(([k, v]) => `${k}: ${v}`).join(', ');
+      } else {
+        throw extractErr;
+      }
+    }
+    
     const finalKey = await aiService.parseAnswerKeyFromText({ answerKeySection, regexParsed, totalQuestions: totalQ });
 
     // --- STEP 4: Map answers to questions ---

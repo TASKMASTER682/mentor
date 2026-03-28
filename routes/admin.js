@@ -54,7 +54,7 @@ router.get('/stats', async (req, res) => {
 
 router.get('/questions', async (req, res) => {
   try {
-    const { page = 1, limit = 20, subject, search } = req.query;
+    const { page = 1, limit = 20, subject, search, sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
     const filter = {};
     
     if (subject) filter.subject = subject;
@@ -65,8 +65,12 @@ router.get('/questions', async (req, res) => {
       ];
     }
 
+    // Build sort object
+    const sort = {};
+    sort[sortBy] = sortOrder === 'asc' ? 1 : -1;
+
     const questions = await Question.find(filter)
-      .sort({ createdAt: -1 })
+      .sort(sort)
       .skip((page - 1) * limit)
       .limit(parseInt(limit));
 
@@ -219,13 +223,13 @@ router.post('/create-test-from-questions', async (req, res) => {
 
     await mockTest.save();
 
-    // Build answer key from questions
-    const answerKey = new Map();
+    // Build answer key from questions - store as plain object
+    const answerKeyObject = {};
     questions.forEach((q, index) => {
-      answerKey.set(String(index + 1), q.correctAnswer);
+      answerKeyObject[String(index + 1)] = String(q.correctAnswer).toUpperCase();
     });
-    mockTest.answerKey = answerKey;
-    mockTest.answerKeyCount = answerKey.size;
+    mockTest.answerKey = answerKeyObject;
+    mockTest.answerKeyCount = Object.keys(answerKeyObject).length;
     await mockTest.save();
 
     res.status(201).json({ 
@@ -243,16 +247,28 @@ router.post('/create-test-from-questions', async (req, res) => {
 
 router.get('/series', async (req, res) => {
   try {
-    const { page = 1, limit = 20 } = req.query;
+    const { page = 1, limit = 20, sortBy = 'createdAt', sortOrder = 'desc', search } = req.query;
     const adminUsers = await User.find({ role: 'admin' }).select('_id');
     const adminUserIds = adminUsers.map(u => u._id);
 
-    const series = await TestSeries.find({ userId: { $in: adminUserIds } })
-      .sort({ createdAt: -1 })
+    const filter = { userId: { $in: adminUserIds } };
+    
+    if (search) {
+      filter.name = { $regex: search, $options: 'i' };
+    }
+
+    // Build sort object
+    const sort = {};
+    const sortField = sortBy || 'createdAt';
+    const sortDirection = sortOrder === 'asc' ? 1 : -1;
+    sort[sortField] = sortDirection;
+
+    const series = await TestSeries.find(filter)
+      .sort(sort)
       .skip((page - 1) * limit)
       .limit(parseInt(limit));
 
-    const total = await TestSeries.countDocuments({ userId: { $in: adminUserIds } });
+    const total = await TestSeries.countDocuments(filter);
 
     res.json({
       series,
@@ -397,13 +413,17 @@ router.put('/tests/:id', async (req, res) => {
 router.put('/tests/:id/answer-key', async (req, res) => {
   try {
     const { answerKey } = req.body;
-    const answerKeyMap = new Map(Object.entries(answerKey));
+    // Store as plain object for consistency
+    const answerKeyObject = {};
+    Object.entries(answerKey).forEach(([k, v]) => {
+      answerKeyObject[String(k)] = String(v).toUpperCase();
+    });
 
     const test = await MockTest.findByIdAndUpdate(
       req.params.id,
       {
-        answerKey: answerKeyMap,
-        answerKeyCount: answerKeyMap.size,
+        answerKey: answerKeyObject,
+        answerKeyCount: Object.keys(answerKeyObject).length,
         status: 'ready'
       },
       { new: true }

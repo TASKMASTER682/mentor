@@ -285,6 +285,10 @@ export async function extractAnswerKeyFromSolutionPdf(solutionPdfPathOrUrl, mock
 
             } catch (err) {
                 console.error(`[AnswerKey] Raw text extraction failed:`, err.message);
+                if (err.message?.includes('does not support image') || err.message?.includes('image input')) {
+                    console.error('[AnswerKey] Vision model does not support image input. Falling back to regex parsing.');
+                    throw new Error('VISION_MODEL_NOT_SUPPORTED');
+                }
             }
 
             // STEP 2: Parse raw text to JSON using AI
@@ -357,6 +361,9 @@ Include EVERY question number you can find.`
 
     } catch (e) {
         console.error("[AnswerKey] Extraction error:", e.message);
+        if (e.message === 'VISION_MODEL_NOT_SUPPORTED') {
+            throw e; // Re-throw to trigger fallback
+        }
         return { regexParsed: {}, answerKeySection: "" };
     } finally {
         if (isDownloaded && localPath && fs.existsSync(localPath)) {

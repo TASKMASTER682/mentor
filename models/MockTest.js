@@ -14,7 +14,7 @@ const mockTestSchema = new mongoose.Schema({
   subject: { type: String, required: true }, // e.g., "Polity", "History"
   year: { type: Number }, // For sorting/filtering
   topics: [{ type: String }],
-  answerKey: { type: Map, of: String, default: new Map() },
+  answerKey: { type: Map, of: String, default: {} },
   markCorrect: { type: Number, default: 2.0 },
   markWrong: { type: Number, default: -0.66 },
   markUnattempted: { type: Number, default: 0 },
