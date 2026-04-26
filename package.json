@@ -11,17 +11,18 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "axios": "^1.13.5",
     "bcryptjs": "^3.0.3",
     "cloudinary": "^2.9.0",
     "cors": "^2.8.6",
+    "crypto": "^1.0.1",
+    "date-fns": "^4.1.0",
     "decompress": "^4.2.1",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
-    "jimp": "^1.6.0",
+    "jimp": "^0.22.12",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.2.1",
     "multer": "^2.0.2",
@@ -33,10 +34,20 @@
     "pdf2json": "^4.0.2",
     "pdfjs-dist": "^5.4.624",
     "pdftoimg-js": "^0.2.5",
+    "razorpay": "^2.9.6",
     "resend": "^4.6.0",
     "socket.io": "^4.8.3",
     "tesseract.js": "^7.0.0",
-    "uploadthing": "^7.7.4",
+    "uploadthing": "^6.12.0",
     "uuid": "^13.0.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/taskmaster682/mentor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/taskmaster682/mentor/issues"
+  },
+  "homepage": "https://github.com/taskmaster682/mentor#readme",
+  "description": ""
 }

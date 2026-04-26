@@ -14,6 +14,7 @@ import authRoutes from './routes/auth.js';
 import userRoutes from './routes/user.js';
 import libraryRoutes from './routes/library.js';
 import missionRoutes from './routes/missions.js';
+import plansRoutes from './routes/plans.js';
 import trackerRoutes from './routes/tracker.js';
 import scheduleRoutes from './routes/schedule.js';
 import mentorRoutes from './routes/mentor.js';
@@ -22,9 +23,10 @@ import mockTestRoutes from './routes/mockTest.js';
 import ddayRoutes from './routes/dday.js';
 import adminRoutes from './routes/admin.js';
 import youtubeCourseRoutes from './routes/youtubeCourse.js';
-import pdfsRoutes from './routes/pdfs.js';
-import pdfReaderRoutes from './routes/pdfReader.js';
-import { schedulerService } from './services/schedulerService.js';
+import subscriptionRoutes from './routes/subscription.js';
+import coursesRoutes from './routes/courses.js';
+import paymentRoutes from './routes/payments.js';
+import adminSettingsRoutes from './routes/adminSettings.js';
 
 const app = express();
 const httpServer = createServer(app);
@@ -42,16 +44,19 @@ app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/library', libraryRoutes);
 app.use('/api/missions', missionRoutes);
+app.use('/api/plans', plansRoutes);
 app.use('/api/tracker', trackerRoutes);
 app.use('/api/schedule', scheduleRoutes);
 app.use('/api/mentor', mentorRoutes);
 app.use('/api/tests', testRoutes);
-app.use('/api/mock-tests', mockTestRoutes);                 // NEW
+app.use('/api/mock-tests', mockTestRoutes);
 app.use('/api/d-day', ddayRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/youtube-courses', youtubeCourseRoutes);
-app.use('/api/pdfs', pdfsRoutes);
-app.use('/api/pdf-reader', pdfReaderRoutes);
+app.use('/api/courses', coursesRoutes);
+app.use('/api/subscription', subscriptionRoutes);
+app.use('/api/payments', paymentRoutes);
+app.use('/api/settings', adminSettingsRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date() }));
 
@@ -86,10 +91,6 @@ if (keepAliveUrl) {
     }
   });
 }
-
-cron.schedule('0 23 * * *', async () => {
-  await schedulerService.generateNightlySchedules();
-});
 
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/upsc-pos')
   .then(() => {

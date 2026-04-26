@@ -2,7 +2,6 @@ import express from 'express';
 import { authenticate } from '../middleware/auth.js';
 import DailyTracker from '../models/DailyTracker.js';
 import User from '../models/User.js';
-import { aiService } from '../services/aiService.js';
 
 const router = express.Router();
 router.use(authenticate);
@@ -22,12 +21,23 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const {
-      tasks, focusScore, energyLevel, mood,
+      tasks, habits, focusScore, energyLevel, mood,
       notesPrepared, topicsNotUnderstood, notes, totalStudyHours,
-      date: dateStr
+      date: dateStr, completionRate
     } = req.body;
 
-    const safeTasks = Array.isArray(tasks) ? tasks : [];
+    // Handle new habits format
+    let safeTasks = [];
+    if (Array.isArray(habits) && habits.length > 0) {
+      safeTasks = habits.map((h) => ({
+        name: h.type,
+        status: h.completed ? 'completed' : 'pending',
+        actualHours: h.hours || 0,
+      }));
+    } else if (Array.isArray(tasks)) {
+      safeTasks = tasks;
+    }
+
     const safeTopics = Array.isArray(topicsNotUnderstood)
       ? topicsNotUnderstood
       : typeof topicsNotUnderstood === 'string'
@@ -39,21 +49,15 @@ router.post('/', async (req, res) => {
     const targetDate = dateStr ? new Date(dateStr) : new Date();
     targetDate.setUTCHours(0, 0, 0, 0);
 
-    const completedTasks = safeTasks.filter(t => t?.status === 'completed').length;
-    const completionRate = safeTasks.length > 0 ? Math.round((completedTasks / safeTasks.length) * 100) : 0;
+    const completedTasks = safeTasks.filter((t) => t?.status === 'completed').length;
+    const computedCompletionRate = safeTasks.length > 0 
+      ? Math.round((completedTasks / safeTasks.length) * 100) 
+      : (completionRate || 0);
     const computedStudyHours = safeTasks.reduce((sum, t) => sum + (Number(t?.actualHours) || 0), 0);
 
-    let aiInsight = "Great effort today! ARJUN is tracking your progress.";
-    try {
-      const recentEntries = await DailyTracker.find({ userId: req.user._id }).sort({ date: -1 }).limit(7);
-      aiInsight = await aiService.generateDailyInsight({
-        tasks: safeTasks, focusScore, mood, energyLevel,
-        completionRate, notesPrepared, topicsNotUnderstood,
-        recentEntries
-      });
-    } catch (aiErr) {
-      console.error("AI Insight Generation Failed:", aiErr.message);
-    }
+    let aiInsight = "Keep up the great work!";
+    // AI insight disabled for faster response
+    // Can be enabled later if needed
 
     const data = {
       tasks: safeTasks,
@@ -64,7 +68,7 @@ router.post('/', async (req, res) => {
       topicsNotUnderstood: safeTopics,
       notes,
       totalStudyHours: !isNaN(safeTotalStudyHours) ? safeTotalStudyHours : computedStudyHours,
-      completionRate,
+      completionRate: computedCompletionRate,
       aiInsight
     };
 
@@ -84,7 +88,7 @@ router.post('/', async (req, res) => {
     const yesterday = new Date(targetDate);
     yesterday.setUTCDate(yesterday.getUTCDate() - 1);
 
-    if (completionRate > 30) {
+    if (computedCompletionRate > 30) {
       const lastDateObj = lastDate ? new Date(lastDate) : null;
       if (lastDateObj) lastDateObj.setUTCHours(0, 0, 0, 0);
 

@@ -4,7 +4,9 @@ const videoProgressSchema = new mongoose.Schema({
   videoId: { type: String, required: true },
   completed: { type: Boolean, default: false },
   completedAt: Date,
-  watchTime: { type: Number, default: 0 }
+  watchTime: { type: Number, default: 0 },
+  viewCount: { type: Number, default: 0 },
+  lastViewedAt: Date
 });
 
 const userCourseProgressSchema = new mongoose.Schema({

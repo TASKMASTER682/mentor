@@ -123,6 +123,34 @@ const fallbackParseSyllabus = (syllabusText = '') => {
 };
 
 export const aiService = {
+  async generatePerformanceInsight(missions) {
+    try {
+      const openai = getOpenAIClient();
+      
+      const missionSummary = missions.map(m => 
+        `${m.name}: ${m.completedValue || 0}/${m.totalTarget} (${m.progressPercent}% complete, ${m.remainingDays} days left)`
+      ).join('\n');
+
+      const response = await openai.chat.completions.create({
+        model: 'meta/llama-3.1-405b-instruct',
+        messages: [{
+          role: 'user',
+          content: `Based on this mission data, provide a brief 1-sentence insight:
+${missionSummary}
+
+Keep it brief and actionable. E.g., "You're behind by 2 hours on X mission."
+`
+        }],
+        temperature: 0.5,
+        max_tokens: 100
+      });
+      return response.choices[0].message.content.trim();
+    } catch (err) {
+      console.error('Performance Insight Error:', err.message);
+      return null;
+    }
+  },
+
   async generateDailyInsight({ tasks, focusScore, mood, energyLevel, completionRate, notesPrepared, topicsNotUnderstood, recentEntries }) {
     try {
       const response = await getOpenAIClient().chat.completions.create({
@@ -177,52 +205,7 @@ Generate a JSON strategy with: priority (high/medium/low), approach (string desc
       return { priority: 'medium', approach: 'Focus on completing chapters systematically', tips: ['Start with important topics', 'Revise regularly', 'Practice answer writing'] };
     }
   },
-  async calculateConfidenceScore(recentData) {
-    try {
-      const { trackerEntries, scheduleStats } = recentData;
-      const avgCompletion = trackerEntries.length > 0
-        ? Math.round(trackerEntries.reduce((sum, e) => sum + (Number(e.completionRate) || 0), 0) / trackerEntries.length)
-        : 0;
-      const avgFocus = trackerEntries.length > 0
-        ? Math.round(trackerEntries.reduce((sum, e) => sum + (Number(e.focusScore) || 0), 0) / trackerEntries.length)
-        : 0;
-      const avgEnergy = trackerEntries.length > 0
-        ? Math.round(trackerEntries.reduce((sum, e) => sum + (Number(e.energyLevel) || 0), 0) / trackerEntries.length)
-        : 0;
-      const scheduleCompletion = scheduleStats.length > 0
-        ? Math.round(scheduleStats.reduce((sum, s) => sum + (s.completedBlocks / s.totalBlocks), 0) / scheduleStats.length * 100)
-        : 0;
-      const totalHoursSpent = scheduleStats.reduce((sum, s) => sum + (s.totalTimeSpent || 0), 0);
 
-      const response = await getOpenAIClient().chat.completions.create({
-        model: 'meta/llama-3.1-405b-instruct',
-        messages: [{
-          role: 'user',
-          content: `Calculate a confidence score (0-100) for a UPSC aspirant based on:
-- Average Daily Completion Rate: ${avgCompletion}%
-- Average Focus Score: ${avgFocus}/10
-- Average Energy Level: ${avgEnergy}/10
-- Schedule Completion Rate: ${scheduleCompletion}%
-- Total Study Hours This Week: ${totalHoursSpent} minutes (${Math.round(totalHoursSpent/60)} hours)
-
-Consider:
-- Consistency over time
-- Quality of focus and energy
-- Progress on scheduled tasks
-- Total effort invested
-
-Return ONLY a number between 0-100. No explanation.`
-        }],
-        temperature: 0.3,
-        max_tokens: 10
-      });
-      const score = parseInt(response.choices[0].message.content.trim());
-      return isNaN(score) ? null : clamp(score, 0, 100);
-    } catch (err) {
-      console.error('AI Confidence Calculation Error:', err.message);
-      return null;
-    }
-  },
   async parseSyllabus(syllabusText, subject) {
     try {
       const response = await getOpenAIClient().chat.completions.create({
@@ -701,8 +684,8 @@ All values must be plain strings.`
 
   async formatTableQuestion(questionText) {
     try {
-      const response = await getGroqClient().chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
+      const response = await getOpenAIClient().chat.completions.create({
+        model: 'meta/llama-3.1-405b-instruct',
         messages: [{
           role: 'system',
           content: `You are an expert UPSC parser. The user will provide a match-the-column or pairs-based question.
@@ -732,8 +715,8 @@ Do not wrap your output in markdown code blocks (\`\`\`html) - return ONLY the r
 
   async formatComplexQuestion(questionText, statements) {
     try {
-      const response = await getGroqClient().chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
+      const response = await getOpenAIClient().chat.completions.create({
+        model: 'meta/llama-3.1-405b-instruct',
         messages: [{
           role: 'system',
           content: `You are an expert UPSC question formatter. 

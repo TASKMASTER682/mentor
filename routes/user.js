@@ -53,41 +53,9 @@ router.get('/stats', async (req, res) => {
       ? Math.round(weekEntries.reduce((sum, e) => sum + (Number(e.completionRate) || 0), 0) / weekEntries.length)
       : 0;
 
-    let confidenceScore = clamp(Number(user?.stats?.confidenceScore) || 50, 0, 100);
+    // Confidence score calculation removed as per user request
+    const confidenceScore = user?.stats?.confidenceScore || 0;
 
-    if (confidenceEntries.length > 0) {
-      const recentData = {
-        trackerEntries: confidenceEntries.slice(-7).map(e => ({
-          date: e.date,
-          completionRate: e.completionRate,
-          focusScore: e.focusScore,
-          mood: e.mood,
-          energyLevel: e.energyLevel
-        })),
-        scheduleStats: recentSchedules.map(s => ({
-          date: s.date,
-          totalBlocks: s.blocks?.length || 0,
-          completedBlocks: s.blocks?.filter(b => b.completed).length || 0,
-          totalTimeSpent: s.blocks?.reduce((sum, b) => sum + (b.timeSpent || 0), 0) || 0
-        }))
-      };
-
-      try {
-        const aiConfidence = await aiService.calculateConfidenceScore(recentData);
-        if (aiConfidence !== null) {
-          confidenceScore = aiConfidence;
-        }
-      } catch (aiErr) {
-        console.error('AI Confidence Error:', aiErr.message);
-        confidenceScore = Math.round(
-          confidenceEntries.reduce((sum, e) => {
-            const completion = clamp(Number(e.completionRate) || 0, 0, 100);
-            const focusAsPercent = clamp((Number(e.focusScore) || 0) * 10, 0, 100);
-            return sum + (completion * 0.6) + (focusAsPercent * 0.4);
-          }, 0) / confidenceEntries.length
-        );
-      }
-    }
 
     const updatedUser = await User.findByIdAndUpdate(
       user._id,

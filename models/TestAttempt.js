@@ -11,6 +11,7 @@ const userAnswerSchema = new mongoose.Schema({
   questionImageUrl: { type: String, default: null }, // Cropped question image
   questionText: { type: String },
   explanation: { type: String },
+  options: { type: mongoose.Schema.Types.Mixed, default: null },
   mentorAdvice: { type: String, default: null }, // 2-3 line advice
 });
 const subjectBreakdownSchema = new mongoose.Schema({

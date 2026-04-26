@@ -1,6 +1,7 @@
 # Dependency folders (Ye bahut heavy hote hain)
 node_modules/
 
+
 # Local environment variables (Inme aapki API keys hoti hain)
 .env
 .env.local

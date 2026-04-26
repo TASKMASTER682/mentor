@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
@@ -10,7 +11,7 @@ import { UTApi } from "uploadthing/server";
 import { File } from "node:buffer";
 import Tesseract from 'tesseract.js';
 import OpenAI from 'openai';
-import { Jimp } from 'jimp';
+import Jimp from 'jimp';
 
 let groq = null;
 const getGroqClient = () => {
@@ -54,7 +55,7 @@ const getNvidiaClient = () => {
 };
 
 
-const utapi = new UTApi();
+const utapi = new UTApi({ token: process.env.UPLOADTHING_SECRET });
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 

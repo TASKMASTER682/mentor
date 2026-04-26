@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import fs from 'fs';
 import jwt from 'jsonwebtoken';
@@ -22,7 +23,7 @@ import Question from '../models/Question.js';
 import { parseQuestions, parseSolutions, mapQuestionsAndSolutions, extractAnswersRegex } from '../utils/parser.js';
 
 
-const utapi = new UTApi();
+const utapi = new UTApi({ token: process.env.UPLOADTHING_SECRET });
 
 const router = express.Router();
 
@@ -166,7 +167,7 @@ router.get('/attempts/all/list', async (req, res) => {
     const limit = Number(req.query.limit);
 
     let query = TestAttempt.find({ userId: req.user._id })
-      .populate('mockTestId', 'name testType totalQuestions durationMinutes markCorrect markWrong testSeriesId')
+      .populate('mockTestId', 'name testType totalQuestions durationMinutes markCorrect markWrong testSeriesId mode')
       .sort({ submittedAt: -1 });
 
     if (Number.isFinite(limit) && limit > 0) {
@@ -260,19 +261,13 @@ router.post('/upload-structured', requireAdmin, async (req, res) => {
       return res.status(400).json({ error: "Question paper and solution text are required" });
     }
 
-    // 1. Local pattern-based parsing (zero AI calls, instant)
-    console.log(`[Structured Upload] Starting Local Parsing for ${subject}...`);
     const parsedQuestions = await parseQuestions(questionPaperText);
     const parsedSolutions = parseSolutions(solutionText);
     let mappedData = mapQuestionsAndSolutions(parsedQuestions, parsedSolutions);
-    // console.log(`[Structured Upload] Parser found ${mappedData.length} questions in ${Date.now() - t0}ms`);
 
     if (!mappedData || mappedData.length === 0) {
       return res.status(400).json({ error: "No questions could be parsed. Please check the format (Q.1) ... a) b) c) d))" });
     }
-
-    // Log a sample
-    // console.log("[Structured Upload] Sample Q1:", JSON.stringify(mappedData[0], null, 2));
 
     // 2. Validate & normalize all questions
     const validQuestions = [];
@@ -283,7 +278,7 @@ router.post('/upload-structured', requireAdmin, async (req, res) => {
       const qCorrect = String(qData.correctAnswer || '').toUpperCase().trim();
 
       if (!qText || !qOpts || !qNum) {
-        console.warn(`[Structured Upload] Skipping Q${qNum || '?'} — missing text/options`);
+        console.warn(`[Structured Upload] Skipping Q${qNum || '?'} — missing text/options. qText:`, !!qText, "qOpts:", !!qOpts, "qNum:", qNum);
         continue;
       }
       if (!['A', 'B', 'C', 'D'].includes(qCorrect)) {
@@ -308,8 +303,11 @@ router.post('/upload-structured', requireAdmin, async (req, res) => {
     }
 
     if (validQuestions.length === 0) {
+      console.log("[Structured Upload] No valid questions after validation");
       return res.status(400).json({ error: "No valid questions with correct answers were found." });
     }
+    
+    console.log("[Structured Upload] Valid questions:", validQuestions.length);
 
     // 3. First create MockTest to get its ID (needed for question linking)
     const answerKeyObject = {};
@@ -400,8 +398,25 @@ router.post('/upload-structured', requireAdmin, async (req, res) => {
 router.get('/attempts/:attemptId', async (req, res) => {
   try {
     const attempt = await TestAttempt.findOne({ _id: req.params.attemptId, userId: req.user._id })
-      .populate('mockTestId', 'name testType totalQuestions markCorrect markWrong mode');
+      .populate('mockTestId', 'name testType totalQuestions markCorrect markWrong mode structuredQuestions');
+    
     if (!attempt) return res.status(404).json({ error: 'Attempt not found' });
+    
+    // If options missing in userAnswers, try to get from structuredQuestions
+    if (attempt.mockTestId?.structuredQuestions) {
+      const structuredOpts = {};
+      attempt.mockTestId.structuredQuestions.forEach((q) => {
+        structuredOpts[q.questionNumber] = q.options;
+      });
+      
+      // Enrich userAnswers with options if missing
+      attempt.userAnswers = attempt.userAnswers.map((ua) => {
+        if (!ua.options && structuredOpts[ua.questionNumber]) {
+          return { ...ua, options: structuredOpts[ua.questionNumber] };
+        }
+        return ua;
+      });
+    }
     res.json(attempt);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -428,12 +443,15 @@ router.post('/:id/submit', async (req, res) => {
     // Build question map
     const questionTextMap = new Map();
     const explanationMap = new Map();
+    const optionsMap = new Map();
 
     if (mockTest.mode === 'structured') {
       const populatedTest = await MockTest.findById(mockTest._id).populate('structuredQuestions');
+      
       populatedTest.structuredQuestions.forEach(q => {
         questionTextMap.set(q.questionNumber, q.text);
         explanationMap.set(q.questionNumber, q.explanation);
+        optionsMap.set(q.questionNumber, q.options);
       });
     } else if (mockTest.questions) {
       mockTest.questions.forEach(q => {
@@ -443,11 +461,12 @@ router.post('/:id/submit', async (req, res) => {
 
     const result = calculateScore(userAnswers, mockTest.answerKey, markingScheme);
 
-    // Enrich results with text and explanations
+    // Enrich results with text, explanations and options
     const enrichedUserAnswers = result.userAnswers.map(ans => ({
       ...ans,
       questionText: questionTextMap.get(ans.questionNumber) || "",
-      explanation: explanationMap.get(ans.questionNumber) || ""
+      explanation: explanationMap.get(ans.questionNumber) || "",
+      options: optionsMap.get(ans.questionNumber) || null
     }));
 
     // No need to enrich with imageUrls

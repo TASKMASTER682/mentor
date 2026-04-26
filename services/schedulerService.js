@@ -1,337 +1,10 @@
-
-
-import User from '../models/User.js';
-import Schedule from '../models/Schedule.js';
 import Mission from '../models/Mission.js';
-import LibrarySource from '../models/LibrarySource.js';
-import DailyTracker from '../models/DailyTracker.js';
-import TestAttempt from '../models/TestAttempt.js';          // NEW
-import { aiService } from './aiService.js';
-
-const toMinutes = (hhmm = '00:00') => {
-  const [h, m] = String(hhmm).split(':').map((v) => Number(v) || 0);
-  return (h * 60) + m;
-};
-
-const toHHMM = (totalMinutes = 0) => {
-  const safe = Math.max(0, Math.min(24 * 60, Math.round(totalMinutes)));
-  const hours = Math.floor(safe / 60).toString().padStart(2, '0');
-  const minutes = (safe % 60).toString().padStart(2, '0');
-  return `${hours}:${minutes}`;
-};
-
-const normalizeWindow = (window) => {
-  if (!window?.startTime || !window?.endTime) return null;
-  const start = toMinutes(window.startTime);
-  const end = toMinutes(window.endTime);
-  if (end <= start) return null;
-  return { start, end, startTime: toHHMM(start), endTime: toHHMM(end) };
-};
-
-const REQUIRED_DAILY_BLOCKS = [
-  {
-    key: 'fitness',
-    requiredMinutes: 60,
-    subject: 'Fitness & Mental Conditioning',
-    topic: 'Exercise, breath-work, and meditation',
-    taskType: 'fitness',
-    priority: 'high',
-  },
-  {
-    key: 'csat',
-    requiredMinutes: 120,
-    subject: 'CSAT',
-    topic: 'Quantitative aptitude and reasoning practice',
-    taskType: 'mcq',
-    priority: 'high',
-  },
-  {
-    key: 'answer_writing',
-    requiredMinutes: 60,
-    subject: 'Answer Writing',
-    topic: 'Structured UPSC answer writing practice',
-    taskType: 'answer_writing',
-    priority: 'high',
-  },
-];
-
-const classifyRequiredBlock = (block = {}) => {
-  const text = `${block.subject || ''} ${block.topic || ''} ${block.focus || ''}`.toLowerCase();
-  const type = String(block.taskType || '').toLowerCase();
-
-  if (text.includes('csat') || type === 'mcq') return 'csat';
-  if (text.includes('answer writing') || text.includes('answer_writing') || type === 'answer_writing') {
-    return 'answer_writing';
-  }
-  if (text.includes('fitness') || text.includes('exercise') || text.includes('meditation') || text.includes('mental') || type === 'fitness') {
-    return 'fitness';
-  }
-  return null;
-};
 
 export const schedulerService = {
-  async generateScheduleForUser(user, options = {}) {
-    try {
-      const { additionalInstruction = '', currentSchedule = null, resetRefinements = false, scheduleWindow = null, date = null } = options;
-
-      // Use provided date or today. Normalize to UTC-midnight for consistency.
-      const targetDate = date ? new Date(date) : new Date();
-      targetDate.setUTCHours(0, 0, 0, 0);
-
-      const activeMissions = await Mission.find({ userId: user._id, status: 'active' }).sort({ priority: 1, deadline: 1 });
-      const sources = await LibrarySource.find({ userId: user._id });
-
-      const weekAgo = new Date(targetDate);
-      weekAgo.setUTCDate(weekAgo.getUTCDate() - 7);
-      const recentEntries = await DailyTracker.find({ userId: user._id, date: { $gte: weekAgo } });
-      const subjectCompletionMap = {};
-      recentEntries.forEach(entry => {
-        entry.tasks.forEach(task => {
-          if (!subjectCompletionMap[task.subject]) subjectCompletionMap[task.subject] = { completed: 0, total: 0 };
-          subjectCompletionMap[task.subject].total++;
-          if (task.status === 'completed') subjectCompletionMap[task.subject].completed++;
-        });
-      });
-
-      const avoidedSubjects = Object.entries(subjectCompletionMap)
-        .filter(([_, v]) => v.total > 0 && v.completed / v.total < 0.5)
-        .map(([k]) => k);
-      const recentAttempts = await TestAttempt.find({ userId: user._id })
-        .sort({ submittedAt: -1 }).limit(2);
-
-      const testWeakSubjects = [];
-      recentAttempts.forEach(a => {
-        if (a.aiFeedback?.prioritySubjects?.length) {
-          testWeakSubjects.push(...a.aiFeedback.prioritySubjects);
-        } else if (a.subjectBreakdown?.length) {
-          a.subjectBreakdown
-            .filter(s => s.accuracy < 40 && s.total >= 3)
-            .forEach(s => testWeakSubjects.push(s.subject));
-        }
-      });
-      const allWeakSubjects = [...new Set([...testWeakSubjects, ...avoidedSubjects])];
-
-      const inferredWindow = (() => {
-        if (!Array.isArray(currentSchedule?.blocks) || currentSchedule.blocks.length === 0) return null;
-        const first = currentSchedule.blocks[0];
-        const last = currentSchedule.blocks[currentSchedule.blocks.length - 1];
-        return normalizeWindow({ startTime: first?.startTime, endTime: last?.endTime });
-      })();
-      let effectiveWindow = normalizeWindow(scheduleWindow) || inferredWindow;
-      if (!effectiveWindow) {
-        const now = new Date();
-        const startMinutes = (now.getHours() * 60) + now.getMinutes();
-        const roundedStart = Math.min(23 * 60, Math.ceil(startMinutes / 15) * 15);
-        const toHHMM = (mins) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
-        effectiveWindow = {
-          start: roundedStart,
-          end: 23 * 60,
-          startTime: toHHMM(roundedStart),
-          endTime: '23:00'
-        };
-      }
-
-      const targetDateStr = targetDate.toISOString().slice(0, 10);
-      
-      const prunedUser = {
-        _id: user._id?.toString?.() || user._id,
-        name: user.name
-      };
-
-      const blocks = await aiService.generateSchedule({
-        user: prunedUser, sources, activeMissions, recentEntries,
-        avoidedSubjects: allWeakSubjects,
-        additionalInstruction,
-        currentScheduleBlocks: Array.isArray(currentSchedule?.blocks) ? currentSchedule.blocks : [],
-        scheduleWindow: effectiveWindow,
-        targetDateStr
-      });
-
-      const fitBlocksToWindow = (inputBlocks = [], window) => {
-        if (!window) return inputBlocks;
-
-        let cursor = window.start;
-        const out = [];
-
-        for (const block of inputBlocks) {
-          if (cursor >= window.end) break;
-
-          const parsedDuration = this.calculateDuration(block?.startTime, block?.endTime);
-          const plannedDuration = Number(block?.plannedDurationMinutes) || 0;
-          const dailyHours = Number(block?.dailyHoursRequired);
-          const fallbackDuration = Number.isFinite(dailyHours) && dailyHours > 0
-            ? Math.min(180, Math.round(dailyHours * 60))
-            : 60;
-          const duration = plannedDuration > 0 ? plannedDuration : (parsedDuration > 0 ? parsedDuration : fallbackDuration);
-          const end = Math.min(window.end, cursor + duration);
-          if (end <= cursor) continue;
-
-          out.push({
-            ...block,
-            startTime: toHHMM(cursor),
-            endTime: toHHMM(end),
-          });
-          cursor = end;
-        }
-
-        return out;
-      };
-
-      const ensureMandatoryBlocks = (inputBlocks = [], window) => {
-        if (!window) return inputBlocks;
-
-        const windowMinutes = window.end - window.start;
-        if (windowMinutes <= 0) return inputBlocks;
-
-        const missionSubjects = new Set(activeMissions.map(m => m.subject.toLowerCase()));
-
-        const totals = { fitness: 0, csat: 0, answer_writing: 0 };
-        const existingMandatory = [];
-        const missionBlocks = [];
-        const otherBlocks = [];
-        const coveredMissionSubjects = new Set();
-
-        inputBlocks.forEach((block) => {
-          const category = classifyRequiredBlock(block);
-          const parsedDuration = this.calculateDuration(block?.startTime, block?.endTime);
-          const plannedDuration = Number(block?.plannedDurationMinutes) || 0;
-          const duration = plannedDuration > 0 ? plannedDuration : (parsedDuration > 0 ? parsedDuration : 60);
-
-          const subjectLower = String(block.subject || '').toLowerCase();
-          const matchesMission = missionSubjects.has(subjectLower);
-
-          if (category) {
-            totals[category] += duration;
-            existingMandatory.push(block);
-          } else if (matchesMission) {
-            missionBlocks.push(block);
-          } else {
-            otherBlocks.push(block);
-          }
-
-          if (matchesMission) {
-            coveredMissionSubjects.add(subjectLower);
-          }
-        });
-
-        const missingMissionBlocks = activeMissions
-          .filter(m => !coveredMissionSubjects.has(m.subject.toLowerCase()))
-          .map(m => {
-            coveredMissionSubjects.add(m.subject.toLowerCase()); // Avoid duplicates in same loop
-            return {
-              subject: m.subject,
-              topic: m.title,
-              focus: "Mission Study Block",
-              taskType: 'learning',
-              priority: 1,
-              plannedDurationMinutes: Math.max(60, Math.round((m.dailyHoursRequired || 2) * 60 / 2))
-            };
-          });
-
-        const requiredTotal = REQUIRED_DAILY_BLOCKS.reduce((sum, r) => sum + r.requiredMinutes, 0);
-        const scale = windowMinutes < requiredTotal ? windowMinutes / requiredTotal : 1;
-
-        const missingMandatoryBlocks = REQUIRED_DAILY_BLOCKS
-          .map((req) => {
-            const target = Math.max(20, Math.round(req.requiredMinutes * scale));
-            const missing = Math.max(0, target - (totals[req.key] || 0));
-            if (missing <= 0) return null;
-
-            // Check if any mission can swallow this mandatory task
-            // e.g. if we need "answer_writing" and have a mission for "Polity", we could label the block.
-            // But for now, we just add the block. 
-            return {
-              subject: req.subject,
-              topic: req.topic,
-              taskType: req.taskType,
-              priority: req.priority,
-              plannedDurationMinutes: missing,
-            };
-          })
-          .filter(Boolean);
-
-        return [
-          ...existingMandatory,
-          ...missionBlocks,
-          ...missingMissionBlocks,
-          ...missingMandatoryBlocks,
-          ...otherBlocks
-        ];
-      };
-
-      const sourceBlocks = Array.isArray(blocks) ? blocks : [];
-      const mandatoryFirstBlocks = ensureMandatoryBlocks(sourceBlocks, effectiveWindow);
-      const normalizedBlocks = fitBlocksToWindow(mandatoryFirstBlocks, effectiveWindow);
-
-      const scheduledBlocks = normalizedBlocks
-        .map(block => {
-          const mission = activeMissions.find(m => m.subject === block.subject);
-          if (!block.startTime || !block.endTime) {
-            console.warn('schedulerService: skipping incomplete block', block);
-            return null;
-          }
-          let mappedPriority = 'medium';
-          if (typeof block.priority === 'string' && ['high', 'medium', 'low'].includes(block.priority)) {
-            mappedPriority = block.priority;
-          } else if (typeof block.priority === 'number') {
-            mappedPriority = block.priority <= 1 ? 'high' : block.priority <= 2 ? 'medium' : 'low';
-          }
-          const taskType = ['learning', 'revision', 'answer_writing', 'mcq', 'test', 'break', 'fitness'].includes(block.taskType)
-            ? block.taskType
-            : 'learning';
-
-          return {
-            ...block,
-            topic: block.topic || block.focus || 'Targeted study block',
-            taskType,
-            priority: mappedPriority,
-            date: targetDate.toISOString().slice(0, 10),
-            missionId: mission?._id,
-            duration: this.calculateDuration(block.startTime, block.endTime)
-          };
-        })
-        .filter(Boolean);
-
-      const totalPlannedHours = scheduledBlocks.reduce((sum, b) => sum + (b.duration / 60), 0);
-      let aiRationale;
-      if (activeMissions.length > 0) {
-        aiRationale = `Mission mode active: ${activeMissions[0].title} gets priority.${avoidedSubjects.length > 0 ? ` Forcing ${avoidedSubjects.join(', ')} into schedule.` : ''}`;
-      } else if (testWeakSubjects.length > 0) {
-        const unique = [...new Set(testWeakSubjects)].slice(0, 3).join(', ');
-        aiRationale = `Balanced plan. Mock test weak areas prioritized: ${unique}.`;
-      } else {
-        aiRationale = 'Balanced study plan based on your library and performance data.';
-      }
-
-      const updatePayload = {
-        userId: user._id,
-        date: targetDate,
-        blocks: scheduledBlocks,
-        totalPlannedHours,
-        activeMissions: activeMissions.map(m => m._id),
-        aiRationale
-      };
-      if (resetRefinements) {
-        updatePayload.refinementCount = 0;
-        updatePayload.refinementNotes = [];
-      }
-
-      const schedule = await Schedule.findOneAndUpdate(
-        { userId: user._id, date: targetDate },
-        updatePayload,
-        { upsert: true, returnDocument: 'after' }
-      );
-
-      return schedule;
-    } catch (err) {
-      console.error('generateScheduleForUser error:', err);
-      throw err;
-    }
-  },
 
   calculateDuration(startTime = '00:00', endTime = '00:00') {
     const safeSplit = (value) => {
-      const parts = (value || '0:0').split(':').map(Number);
+      const parts = (String(value) || '0:0').split(':').map(Number);
       return [parts[0] || 0, parts[1] || 0];
     };
     const [sh, sm] = safeSplit(startTime);
@@ -339,62 +12,167 @@ export const schedulerService = {
     return (eh * 60 + em) - (sh * 60 + sm);
   },
 
-  async refineTodayScheduleForUser(user, instruction, date = null) {
-    const cleanedInstruction = String(instruction || '').trim();
-    if (!cleanedInstruction) {
-      throw new Error('Instruction is required');
-    }
-
-    const targetDate = date ? new Date(date) : new Date();
-    targetDate.setUTCHours(0, 0, 0, 0);
-
-    let schedule = await Schedule.findOne({ userId: user._id, date: targetDate });
-    if (!schedule) {
-      schedule = await this.generateScheduleForUser(user, { resetRefinements: true, date: targetDate });
-    }
-
-    const currentCount = Number(schedule.refinementCount) || 0;
-    if (currentCount >= 2) {
-      const limitError = new Error('Refinement limit reached');
-      limitError.code = 'REFINEMENT_LIMIT';
-      throw limitError;
-    }
-
-    const regenerated = await this.generateScheduleForUser(user, {
-      additionalInstruction: cleanedInstruction,
-      currentSchedule: schedule,
-      resetRefinements: false,
-    });
-
-    const updated = await Schedule.findOneAndUpdate(
-      { _id: regenerated._id, userId: user._id },
-      {
-        $set: {
-          refinementCount: currentCount + 1,
-          aiRationale: `${regenerated.aiRationale} | Refined with user instruction.`,
-        },
-        $push: {
-          refinementNotes: {
-            instruction: cleanedInstruction,
-            createdAt: new Date(),
-          }
-        }
-      },
-      { returnDocument: 'after' }
-    );
-
-    return updated;
+  toHHMM(totalMinutes = 0) {
+    const safe = Math.max(0, Math.min(24 * 60, Math.round(totalMinutes)));
+    const hours = Math.floor(safe / 60).toString().padStart(2, '0');
+    const minutes = (safe % 60).toString().padStart(2, '0');
+    return `${hours}:${minutes}`;
   },
 
-  async generateNightlySchedules() {
-    try {
-      const users = await User.find({});
-      for (const user of users) {
-        await this.generateScheduleForUser(user);
+  getActiveMissions(userId) {
+    return Mission.find({ 
+      userId, 
+      status: 'active' 
+    });
+  },
+
+  calculatePriority(mission) {
+    const remaining = mission.totalTarget - mission.completedValue;
+    const days = Math.max(1, mission.remainingDays);
+    return remaining / days;
+  },
+
+  convertToBlocks(totalMinutes) {
+    if (totalMinutes <= 0) return [];
+    const blocks = [];
+    let remaining = totalMinutes;
+    
+    while (remaining > 0) {
+      if (remaining >= 120) {
+        blocks.push(120);
+        remaining -= 120;
+      } else if (remaining >= 60) {
+        blocks.push(60);
+        remaining -= 60;
+      } else {
+        blocks.push(remaining);
+        remaining = 0;
       }
-    } catch (err) {
-      console.error('Nightly scheduler error:', err);
     }
+    
+    return blocks;
+  },
+
+  async generateDailyPlan(userId, availableHours) {
+    const availableMinutes = availableHours * 60;
+    
+    const missions = await Mission.find({ 
+      userId, 
+      status: 'active' 
+    }).sort({ priority: 1 });
+
+    const activeMissions = missions.filter(m => {
+      const now = new Date();
+      return m.status === 'active' && m.startDate <= now && m.endDate >= now;
+    });
+
+    if (activeMissions.length === 0) {
+      return {
+        allocations: [],
+        totalRequired: 0,
+        totalAvailable: availableMinutes,
+        deficit: 0,
+        message: 'No active missions'
+      };
+    }
+
+    const sortedMissions = activeMissions.map(m => ({
+      ...m.toObject(),
+      priorityScore: this.calculatePriority(m),
+      dailyRequired: m.dailyRequired
+    })).sort((a, b) => b.priorityScore - a.priorityScore);
+
+    const allocations = [];
+    let remainingMinutes = availableMinutes;
+    let totalRequired = 0;
+
+    for (const mission of sortedMissions) {
+      if (remainingMinutes <= 0) break;
+
+      const remaining = mission.totalTarget - mission.completedValue;
+      const days = Math.max(1, mission.remainingDays);
+      const dailyNeeded = remaining / days;
+      
+      totalRequired += dailyNeeded;
+
+      const assignMinutes = Math.min(dailyNeeded, remainingMinutes);
+      
+      allocations.push({
+        missionId: mission._id,
+        missionName: mission.name,
+        allocatedMinutes: assignMinutes,
+        dailyRequired: dailyNeeded,
+        blocks: this.convertToBlocks(assignMinutes),
+        remainingHours: remaining,
+        daysLeft: days
+      });
+
+      remainingMinutes -= assignMinutes;
+    }
+
+    const deficit = Math.max(0, totalRequired - availableMinutes);
+    const excess = Math.max(0, availableMinutes - totalRequired);
+
+    return {
+      allocations,
+      totalRequired,
+      totalAvailable: availableMinutes,
+      deficit: deficit > 0 ? deficit : 0,
+      excessHours: excess > 0 ? excess / 60 : 0,
+      shouldIncreaseBy: deficit > 0 ? Math.ceil(totalRequired / 60) - availableHours : 0
+    };
+  },
+
+  async logProgress(missionId, userId, value, type = 'hours') {
+    const mission = await Mission.findOne({ _id: missionId, userId });
+    if (!mission) throw new Error('Mission not found');
+
+    const completedValue = type === 'hours' ? value : value;
+    mission.completedValue += completedValue;
+
+    if (mission.completedValue >= mission.totalTarget) {
+      mission.status = 'completed';
+      mission.completedAt = new Date();
+    }
+
+    await mission.save();
+    return mission;
+  },
+
+  async recalculateMission(mission) {
+    const remaining = mission.totalTarget - mission.completedValue;
+    const days = Math.max(1, mission.remainingDays);
+    const dailyRequired = remaining / days;
+
+    mission.missedDays = days < Math.ceil((mission.endDate - mission.startDate) / (1000 * 60 * 60 * 24)) 
+      ? mission.missedDays + 1 
+      : mission.missedDays;
+
+    await mission.save();
+    return {
+      ...mission.toObject(),
+      dailyRequired
+    };
+  },
+
+  getMissionStats(mission) {
+    const remaining = mission.totalTarget - mission.completedValue;
+    const days = mission.remainingDays;
+    const totalDays = Math.ceil((mission.endDate - mission.startDate) / (1000 * 60 * 60 * 24));
+    const daysPassed = totalDays - days;
+    const progressPercent = mission.progressPercent;
+    
+    const onTrack = progressPercent >= ((totalDays - days) / totalDays) * 100;
+
+    return {
+      remainingValue: remaining,
+      remainingDays: days,
+      totalDays,
+      daysPassed,
+      dailyRequired: remaining / days,
+      progressPercent,
+      onTrack,
+      status: mission.status
+    };
   }
 };
-

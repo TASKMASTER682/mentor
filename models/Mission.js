@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 
-const missionTaskSchema = new mongoose.Schema({
+const missionTaskOldSchema = new mongoose.Schema({
   date: Date,
   chapters: [String],
   estimatedHours: Number,
@@ -10,34 +10,43 @@ const missionTaskSchema = new mongoose.Schema({
 
 const missionSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  title: { type: String, required: true },
-  subject: { type: String, required: true },
-  description: String,
-  deadline: { type: Date, required: true },
-  startDate: { type: Date, default: Date.now },
+  name: { type: String, required: true },
+  targetType: { 
+    type: String, 
+    enum: ['hours', 'units'], 
+    default: 'hours' 
+  },
+  totalTarget: { type: Number, required: true },
+  completedValue: { type: Number, default: 0 },
+  startDate: { type: Date, required: true },
+  endDate: { type: Date, required: true },
   status: { type: String, enum: ['active', 'completed', 'paused', 'failed'], default: 'active' },
-  totalChapters: { type: Number, default: 0 },
-  completedChapters: { type: Number, default: 0 },
-  dailyPlan: [missionTaskSchema],
-  totalHoursNeeded: { type: Number, default: 0 },
-  dailyHoursRequired: { type: Number, default: 0 },
-  priority: { type: Number, default: 1 }, // Lower = higher priority (LIFO)
-  warningIssued: { type: Boolean, default: false },
+  priority: { type: Number, default: 1 },
   completedAt: Date,
-  aiStrategy: String,
   missedDays: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now }
 });
 
-missionSchema.virtual('daysRemaining').get(function() {
+missionSchema.virtual('remainingValue').get(function() {
+  return Math.max(0, this.totalTarget - this.completedValue);
+});
+
+missionSchema.virtual('remainingDays').get(function() {
   const now = new Date();
-  const diff = this.deadline - now;
+  const diff = this.endDate - now;
   return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
 });
 
-missionSchema.virtual('progressPercentage').get(function() {
-  if (this.totalChapters === 0) return 0;
-  return Math.round((this.completedChapters / this.totalChapters) * 100);
+missionSchema.virtual('dailyRequired').get(function() {
+  const remaining = this.totalTarget - this.completedValue;
+  const days = this.remainingDays;
+  if (days <= 0 || remaining <= 0) return 0;
+  return remaining / days;
+});
+
+missionSchema.virtual('progressPercent').get(function() {
+  if (this.totalTarget === 0) return 0;
+  return Math.round((this.completedValue / this.totalTarget) * 100);
 });
 
 missionSchema.set('toJSON', { virtuals: true });

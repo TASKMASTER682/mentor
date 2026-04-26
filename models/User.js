@@ -37,6 +37,16 @@ const userSchema = new mongoose.Schema({
     weeklyProductivity: { type: Number, default: 0 },
     lastStudyDate: { type: Date }
   },
+  subscription: {
+    hasSubscription: { type: Boolean, default: false },
+    planName: { type: String, default: '' },
+    status: { type: String, enum: ['active', 'expired', 'none'], default: 'none' },
+    endDate: { type: Date, default: null }
+  },
+  settings: {
+    maxConcurrentSessions: { type: Number, default: 1 },
+    allowMultipleDevices: { type: Boolean, default: false }
+  },
   createdAt: { type: Date, default: Date.now }
 }, { minimize: false });
 
@@ -52,6 +62,13 @@ userSchema.pre('save', async function() {
 
 userSchema.methods.comparePassword = async function(password) {
   return bcrypt.compare(password, this.password);
+};
+
+userSchema.methods.isSubscribed = function() {
+  if (!this.subscription?.hasSubscription) return false;
+  if (this.subscription?.status !== 'active') return false;
+  if (this.subscription?.endDate && new Date() > this.subscription.endDate) return false;
+  return true;
 };
 
 export default mongoose.model('User', userSchema);
