@@ -452,6 +452,9 @@ router.get('/admin/all', requireAdmin, async (req, res) => {
 
 router.post('/admin', requireAdmin, async (req, res) => {
   try {
+    if (req.body.thumbnail && req.body.thumbnail.length > 1.5 * 1024 * 1024) {
+      return res.status(400).json({ error: 'Image size too large. Max 1MB allowed.' });
+    }
     const course = new Course(req.body);
     await course.save();
     res.status(201).json(course);
@@ -462,6 +465,9 @@ router.post('/admin', requireAdmin, async (req, res) => {
 
 router.put('/admin/:id', requireAdmin, async (req, res) => {
   try {
+    if (req.body.thumbnail && req.body.thumbnail.length > 1.5 * 1024 * 1024) {
+      return res.status(400).json({ error: 'Image size too large. Max 1MB allowed.' });
+    }
     const course = await Course.findByIdAndUpdate(req.params.id, req.body, { new: true });
     res.json(course);
   } catch (err) {
@@ -491,6 +497,9 @@ router.get('/admin/:id/lessons', requireAdmin, async (req, res) => {
 
 router.post('/admin/:id/lessons', requireAdmin, async (req, res) => {
   try {
+    if (req.body.thumbnail && req.body.thumbnail.length > 1.5 * 1024 * 1024) {
+      return res.status(400).json({ error: 'Image size too large. Max 1MB allowed.' });
+    }
     const lesson = new Lesson({ ...req.body, courseId: req.params.id });
     await lesson.save();
     res.status(201).json(lesson);
@@ -501,6 +510,9 @@ router.post('/admin/:id/lessons', requireAdmin, async (req, res) => {
 
 router.put('/admin/lessons/:lessonId', requireAdmin, async (req, res) => {
   try {
+    if (req.body.thumbnail && req.body.thumbnail.length > 1.5 * 1024 * 1024) {
+      return res.status(400).json({ error: 'Image size too large. Max 1MB allowed.' });
+    }
     const lesson = await Lesson.findByIdAndUpdate(req.params.lessonId, req.body, { new: true });
     res.json(lesson);
   } catch (err) {

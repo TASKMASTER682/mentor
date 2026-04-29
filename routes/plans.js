@@ -76,6 +76,11 @@ router.patch('/:id/toggle', async (req, res) => {
     if (!plan) return res.status(404).json({ error: 'Plan not found' });
 
     const dateStr = date || format(new Date(), 'yyyy-MM-dd');
+    const today = format(new Date(), 'yyyy-MM-dd');
+
+    if (dateStr < today) {
+      return res.status(403).json({ error: 'Cannot modify tasks for past days' });
+    }
     
     const logEntry = plan.dailyLogs.find(
       l => l.date === dateStr && l.taskId === taskId
