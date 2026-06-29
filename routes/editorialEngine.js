@@ -220,14 +220,20 @@ router.get('/items/today', async (req, res) => {
 });
 
 // GET /api/editorial-engine/items?dateKey=YYYY-MM-DD — fetch items by date
+// Also supports ?createdDate=YYYY-MM-DD to filter by creation/upload date
 router.get('/items', async (req, res) => {
   try {
     const userId = req.user._id;
-    const { dateKey, sourceKey, limit } = req.query;
+    const { dateKey, sourceKey, createdDate, limit } = req.query;
 
     const filter = { userId };
     if (dateKey) filter.runDateKey = dateKey;
     if (sourceKey) filter.sourceKey = sourceKey;
+    if (createdDate) {
+      const start = new Date(createdDate + 'T00:00:00+05:30');
+      const end = new Date(createdDate + 'T23:59:59.999+05:30');
+      filter.createdAt = { $gte: start, $lte: end };
+    }
 
     const items = await EditorialItem.find(filter)
       .sort({ runDateKey: -1, sourceKey: 1, createdAt: -1 })
