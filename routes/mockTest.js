@@ -20,7 +20,7 @@ import { aiService } from '../services/aiService.js';
 import { calculateScore } from '../services/scoringService.js';
 import { UTApi } from "uploadthing/server";
 import Question from '../models/Question.js';
-import { parseQuestions, parseSolutions, mapQuestionsAndSolutions, extractAnswersRegex } from '../utils/parser.js';
+import { parseQuestions, parseSolutions, mapQuestionsAndSolutions, extractAnswersRegex, parseQuestionsFromHTML } from '../utils/parser.js';
 
 
 const utapi = new UTApi({ token: process.env.UPLOADTHING_SECRET });
@@ -391,6 +391,136 @@ router.post('/upload-structured', requireAdmin, async (req, res) => {
 
   } catch (err) {
     console.error("Structured Upload Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /mock-tests/upload-structured-html — HTML-based structured upload using data-* attrs
+router.post('/upload-structured-html', requireAdmin, async (req, res) => {
+  const t0 = Date.now();
+  try {
+    const {
+      name: name, subject: _subject, testType, totalQuestions, durationMinutes,
+      markCorrect, markWrong, questionsHtml, solutionsHtml: _solutionsHtml, testSeriesId, year: _year
+    } = req.body;
+    const subject = _subject || 'General Studies';
+    const solutionsHtml = _solutionsHtml || '';
+    const year = _year || new Date().getFullYear();
+
+    if (!questionsHtml) {
+      return res.status(400).json({ error: "Questions HTML is required" });
+    }
+
+    const parsedData = parseQuestionsFromHTML(questionsHtml, solutionsHtml || '');
+
+    if (!parsedData || parsedData.length === 0) {
+      return res.status(400).json({ error: "No questions could be parsed. Use .ata-question-item with data-question-no." });
+    }
+
+    const validQuestions = [];
+    for (const qData of parsedData) {
+      const qText = qData.questionText?.trim();
+      const qNum = qData.questionNumber;
+      const qOpts = qData.options;
+      const qCorrect = String(qData.correctAnswer || '').toUpperCase().trim();
+
+      if (!qText || !qNum) {
+        console.warn(`[HTML Structured] Skipping Q${qNum || '?'} — missing text`);
+        continue;
+      }
+      if (qCorrect && !['A', 'B', 'C', 'D'].includes(qCorrect)) {
+        console.warn(`[HTML Structured] Skipping Q${qNum} — invalid answer "${qCorrect}"`);
+        continue;
+      }
+
+      validQuestions.push({
+        questionNumber: qNum,
+        text: qText,
+        options: qOpts?.a ? qOpts : { a: 'Option A', b: 'Option B', c: 'Option C', d: 'Option D' },
+        correctAnswer: qCorrect || null,
+        explanation: (qData.explanation || '').trim(),
+        subject: subject || 'General Studies',
+        year: year || new Date().getFullYear()
+      });
+    }
+
+    if (validQuestions.length === 0) {
+      return res.status(400).json({ error: "No valid questions parsed." });
+    }
+
+    const mockTest = new MockTest({
+      userId: req.user._id,
+      testSeriesId: testSeriesId || null,
+      name: name || "HTML Structured Test",
+      testType: testType || 'prelims_gs',
+      subject,
+      year,
+      totalQuestions: totalQuestions || validQuestions.length,
+      durationMinutes: durationMinutes || 120,
+      markCorrect: markCorrect || 2.0,
+      markWrong: markWrong || -0.66,
+      mode: 'structured',
+      structuredQuestions: [],
+      answerKey: {},
+      answerKeyCount: 0,
+      status: 'ready',
+      questionTextExtractionStatus: 'completed',
+      testPdfPath: "NOT_APPLICABLE"
+    });
+    await mockTest.save();
+
+    const answerKeyObject = {};
+    const bulkOps = validQuestions.map(q => ({
+      updateOne: {
+        filter: { text: q.text },
+        update: {
+          $setOnInsert: {
+            questionNumber: q.questionNumber,
+            text: q.text,
+            options: q.options,
+            correctAnswer: q.correctAnswer,
+            explanation: q.explanation,
+            subject: q.subject,
+            year: q.year,
+            mockTestId: mockTest._id
+          }
+        },
+        upsert: true
+      }
+    }));
+
+    await Question.bulkWrite(bulkOps, { ordered: false });
+
+    const questionTexts = validQuestions.map(q => q.text);
+    const savedQuestions = await Question.find({ text: { $in: questionTexts } }).select('_id text questionNumber');
+    const textToQ = new Map(validQuestions.map(q => [q.text, q]));
+    const questionIds = [];
+
+    for (const savedQ of savedQuestions) {
+      const original = textToQ.get(savedQ.text);
+      if (original) {
+        questionIds.push(savedQ._id);
+        answerKeyObject[String(original.questionNumber)] = original.correctAnswer;
+      }
+    }
+
+    await MockTest.findByIdAndUpdate(mockTest._id, {
+      structuredQuestions: questionIds,
+      answerKey: answerKeyObject,
+      answerKeyCount: Object.keys(answerKeyObject).length
+    });
+
+    console.log(`[HTML Structured] DONE — ${validQuestions.length} questions, time: ${Date.now() - t0}ms`);
+
+    res.status(201).json({
+      mockTestId: mockTest._id,
+      status: 'ready',
+      name: mockTest.name,
+      questionCount: validQuestions.length
+    });
+
+  } catch (err) {
+    console.error("HTML Structured Upload Error:", err);
     res.status(500).json({ error: err.message });
   }
 });

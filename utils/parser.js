@@ -1,4 +1,5 @@
 import { aiService } from '../services/aiService.js';
+import * as cheerio from 'cheerio';
 
 /**
  * Smart UPSC Question Paper & Solution Parser
@@ -39,7 +40,15 @@ export const cleanRawText = (text) => {
     return cleaned.replace(/\n{3,}/g, '\n\n').trim();
 };
 
-const cleanTextInline = (text) => text?.replace(/[ \t]+/g, ' ').replace(/\n+/g, ' ').trim() || '';
+const escapeHtml = (text) => {
+  if (!text) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+};
 
 // ─── TYPE DETECTION ─────────────────────────────────────────────────────────
 export const detectQuestionType = (questionText) => {
@@ -49,7 +58,7 @@ export const detectQuestionType = (questionText) => {
     if (/assertion[:\s]/i.test(text) && /reason[:\s]/i.test(text)) return 'assertion_reason';
     if (/\b(I{1,3}|IV|V)\s*[\.\)]/.test(questionText)) return 'roman_numeral';
     if (/\b[1-9]\.\s+[A-Z]/.test(questionText)) return 'numeric_statements';
-    return 'regular_mcq'
+    return 'regular_mcq';
 };
 
 // ─── LOCAL EXTRACTORS ───────────────────────────────────────────────────────
@@ -149,12 +158,12 @@ export const formatQuestionTextToHTML = async (text, type, statements) => {
         tailText = "";
     }
 
-    let html = `<div class="w-full flex flex-col space-y-4">`;
+    let html = `<div class="w-full flex flex-col space-y-4" style="font-family:'Playfair Display',Georgia,serif">`;
     
     // HEADER RENDER
     html += `<div class="w-full">
-                <h3 class="text-lg font-bold text-white leading-snug w-full">
-                    ${questionHeader.replace(/\s+/g, ' ')}
+                <h3 style="font-size:1.125rem;font-weight:700;color:#a63a3a;line-height:1.375">
+                    ${escapeHtml(questionHeader.replace(/\s+/g, ' '))}
                 </h3>
              </div>`;
 
@@ -163,26 +172,26 @@ export const formatQuestionTextToHTML = async (text, type, statements) => {
         const entries = Object.entries(statements).filter(([_, v]) => v !== null && v !== undefined);
         
         if (entries.length > 0 || Array.isArray(statements)) {
-            html += `<div class="w-full bg-slate-800/40 p-4 rounded-lg border-l-4 border-yellow-500 flex flex-col space-y-3">`;
+            html += `<div class="w-full p-4 rounded-lg" style="background:rgba(243,239,227,0.6);border-left:4px solid #ef4444">`;
             
             if (!Array.isArray(statements)) {
                 // Object Case (Statement I, II, III)
                 entries.forEach(([key, val]) => {
                     const cleanVal = val.split(questionPhraseRegex)[0].trim();
-                    html += `<p class="text-gray-200 w-full flex items-start">
-                                <strong class="min-w-[120px] shrink-0 text-yellow-400 font-bold">${key}:</strong> 
-                                <span class="flex-grow leading-relaxed">${cleanVal.replace(/\s+/g, ' ')}</span>
-                             </p>`;
+                html += `<p class="w-full flex items-start" style="color:#1B1510">
+                            <strong style="min-width:120px;flex-shrink:0;color:#ef4444;font-weight:700">${escapeHtml(key)}:</strong> 
+                            <span style="flex-grow:1;line-height:1.625">${escapeHtml(cleanVal.replace(/\s+/g, ' '))}</span>
+                         </p>`;
                 });
             } else {
                 // Array Case (Numeric/Roman)
                 statements.forEach(s => {
                     if (s && s.text) {
                         const cleanStmt = s.text.split(questionPhraseRegex)[0].trim();
-                        html += `<div class="flex items-start w-full py-0.5">
-                                    <span class="text-yellow-400 font-bold min-w-[35px] shrink-0">${s.label}.</span> 
-                                    <span class="text-gray-200 flex-grow leading-relaxed">${cleanStmt.replace(/\s+/g, ' ')}</span>
-                                 </div>`;
+                html += `<div class="flex items-start w-full py-0.5">
+                            <span style="color:#ef4444;font-weight:700;min-width:35px;flex-shrink:0">${escapeHtml(s.label)}.</span> 
+                            <span style="color:#1B1510;flex-grow:1;line-height:1.625">${escapeHtml(cleanStmt.replace(/\s+/g, ' '))}</span>
+                         </div>`;
                     }
                 });
             }
@@ -192,9 +201,9 @@ export const formatQuestionTextToHTML = async (text, type, statements) => {
 
     // 4. TAIL TEXT (Instruction Phrase)
     if (tailText && tailText.length > 5 && tailText !== questionHeader) {
-        html += `<div class="mt-2 pt-2 border-t border-gray-700/50">
-                    <p class="text-white font-medium italic leading-relaxed">
-                        ${tailText.replace(/\s+/g, ' ')}
+        html += `<div class="mt-2 pt-2" style="border-top:1px solid rgba(222,214,190,0.5)">
+                    <p style="color:#1B1510;font-weight:500;font-style:italic;line-height:1.625">
+                        ${escapeHtml(tailText.replace(/\s+/g, ' '))}
                     </p>
                  </div>`;
     }
@@ -255,47 +264,6 @@ export const parseQuestions = async (rawText) => {
 };
 
 // ─── SOLUTIONS PARSER ───────────────────────────────────────────────────────
-// export const parseSolutions = (rawText) => {
-//     const cleaned = cleanRawText(rawText);
-//     const markerRegex = /(?:^|\n)\s*Q\.?(\d+)\s*[\.\)]/gm;
-//     const solutions = [];
-
-//     let match, lastIndex = 0, lastQNum = null;
-//     const blocks = [];
-
-//     while ((match = markerRegex.exec(cleaned)) !== null) {
-//         if (lastQNum !== null) blocks.push({ qNum: lastQNum, body: cleaned.substring(lastIndex, match.index).trim() });
-//         lastQNum = parseInt(match[1]);
-//         lastIndex = match.index + match[0].length;
-//     }
-//     if (lastQNum) blocks.push({ qNum: lastQNum, body: cleaned.substring(lastIndex).trim() });
-
-//     for (const { qNum, body } of blocks) {
-//         const ansMatch = body.match(/(?:Answer|Ans)[\s:]*\)?\s*\(?([a-d])\)?/im);
-//         if (!ansMatch) continue;
-
-//         const answer = ansMatch[1].toUpperCase();
-//         let explanation = '';
-//         const expMatch = body.match(/(?:Exp|Explanation)[\s:]*\)?\s*([\s\S]*)/im);
-        
-//         if (expMatch) {
-//             explanation = expMatch[1]
-//                 .replace(/\bKnowledge Base\s*:[\s\S]*/i, '')
-//                 .replace(/\bSource\s*:\)[\s\S]*/i, '')
-//                 .trim();
-//         } else {
-//             explanation = body.substring(ansMatch.index + ansMatch[0].length).trim();
-//         }
-
-//         solutions.push({
-//             questionNumber: qNum,
-//             correctAnswer: answer,
-//             explanation
-//         });
-//     }
-//     return solutions;
-// };
-// ─── IMPROVED SOLUTIONS PARSER ───────────────────────────────────────────────────────
 export const parseSolutions = (rawText) => {
     const cleaned = cleanRawText(rawText);
     const markerRegex = /(?:^|\n)\s*Q\.?(\d+)\s*[\.\)]/gm;
@@ -373,4 +341,207 @@ export const extractAnswersRegex = (text) => {
         answerKey[match[1]] = match[2].toUpperCase();
     }
     return answerKey;
+};
+
+// ─── HTML STRUCTURED PARSER ─────────────────────────────────────────────────
+// Parses questions from HTML using data-* attributes and classes.
+// Expected HTML structure:
+//   <div class="ata-question-item" data-question-no="1">
+//     <div data-question-stem>...</div>
+//     <div data-statement-intro>...</div>
+//     <ul data-statements-list>...</ul>
+//     <div data-question-continuation>...</div>
+//     <div data-code-instruction>...</div>
+//     <ul data-options-list>
+//       <li data-option="A">text</li>
+//       <li data-option="B">text</li>
+//       ...
+//     </ul>
+//     <div data-case-study>...</div>
+//     <div data-assertion-text>...</div>
+//     <div data-match-list>...</div>
+//   </div>
+//
+// Solutions HTML:
+//   <div class="ata-question-item" data-question-no="1">
+//     <div data-answer>A</div>
+//     <div data-explanation>...</div>
+//   </div>
+
+export const parseQuestionsFromHTML = (questionsHtml, solutionsHtml) => {
+  const stripComments = (html) => html.replace(/<!--[\s\S]*?-->/g, '');
+  const $q = cheerio.load(stripComments(questionsHtml));
+  const $s = solutionsHtml ? cheerio.load(stripComments(solutionsHtml)) : cheerio.load('');
+
+  const esc = (t) => {
+    if (!t) return '';
+    return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  };
+
+  const stripLabelSpan = ($, li) => {
+    const $li = $(li);
+    $li.find('span').each((_, s) => {
+      const t = $(s).text().trim();
+      if (/^[IVXLCDM\d]+\.$/.test(t) || /^\(?[a-d]\)$/.test(t)) $(s).remove();
+    });
+    return $li.text().trim();
+  };
+
+  const buildStem = ($el, $) => {
+    const stemParts = [];
+    const preamble = [];
+    const stmts = [];
+    const labeledStmts = [];
+    const continuations = [];
+    const codeInstrs = [];
+    const extras = [];
+
+    $el.find('[data-question-stem], .question-stem').each((_, e) => stemParts.push($(e).text().trim()));
+    $el.find('[data-statement-intro], .statement-intro').each((_, e) => preamble.push($(e).text().trim()));
+    $el.find('[data-match-intro], .match-intro').each((_, e) => preamble.push($(e).text().trim()));
+
+    $el.find('.statement-item').each((_, e) => {
+      const $item = $(e);
+      const label = $item.find('.assertion-label').text().trim();
+      const text = $item.find('.assertion-text').text().trim();
+      if (text) {
+        if (label) labeledStmts.push({ label, text });
+        else stmts.push(text);
+      } else {
+        const t = $item.text().trim();
+        if (t) stmts.push(t);
+      }
+    });
+    $el.find('[data-statements-list] > li').each((_, e) => {
+      const t = stripLabelSpan($, e);
+      if (t) stmts.push(t);
+    });
+
+    $el.find('[data-question-continuation], .question-continuation').each((_, e) => continuations.push($(e).text().trim()));
+    $el.find('[data-code-instruction], .code-instruction').each((_, e) => codeInstrs.push($(e).text().trim()));
+    $el.find('[data-case-study], .case-study').each((_, e) => extras.push($(e).html().trim()));
+    $el.find('[data-match-wrapper], .match-wrapper').each((_, e) => {
+      let raw = $(e).html().trim();
+      if (raw) {
+        raw = raw.replace(/<table[^>]*>/gi, '').replace(/<\/table>/gi, '');
+        raw = raw.replace(/<td\b/gi, '<td style="border:1px solid #ded6be;padding:0.5rem 0.75rem"');
+        raw = raw.replace(/<th\b/gi, '<th style="border:1px solid #ded6be;padding:0.5rem 0.75rem"');
+        extras.push(`<div style="overflow-x:auto;margin-top:0.5rem"><table style="width:100%;border-collapse:collapse;font-size:0.9375rem;color:#1B1510">${raw}</table></div>`);
+      }
+    });
+
+    let html = '<div class="w-full flex flex-col space-y-4" style="font-family:\'Playfair Display\',Georgia,serif">';
+
+    const heading = [...stemParts, ...preamble].filter(Boolean).join(' ');
+    if (heading) {
+      html += `<div class="w-full"><h3 style="font-size:1.125rem;font-weight:700;color:#a63a3a;line-height:1.375">${esc(heading)}</h3></div>`;
+    }
+
+    const hasAnyStmt = labeledStmts.length || stmts.length;
+    if (hasAnyStmt) {
+      html += '<div class="w-full p-4 rounded-lg" style="background:rgba(243,239,227,0.6);border-left:4px solid #ef4444">';
+      labeledStmts.forEach(({ label, text }) => {
+        const cleanLabel = label.replace(/:\s*$/, '');
+        html += `<div class="flex items-start w-full py-0.5"><span style="color:#ef4444;font-weight:700;min-width:120px;flex-shrink:0">${esc(cleanLabel)}:</span> <span style="color:#1B1510;flex-grow:1;line-height:1.625">${esc(text)}</span></div>`;
+      });
+      stmts.forEach((s, i) => {
+        const cleaned = s.replace(/^[\s]*(?:[IVX]+|\(?[a-z]\)|\d+)[\.\)]\s*/, '');
+        html += `<div class="flex items-start w-full py-0.5"><span style="color:#ef4444;font-weight:700;min-width:35px;flex-shrink:0">${i+1}.</span> <span style="color:#1B1510;flex-grow:1;line-height:1.625">${esc(cleaned)}</span></div>`;
+      });
+      html += '</div>';
+    }
+
+    extras.forEach((e) => {
+      if (e) html += `<div class="mt-2"><p style="color:#1B1510;line-height:1.625">${e}</p></div>`;
+    });
+
+    const tailParts = [...continuations, ...codeInstrs].filter(Boolean);
+    tailParts.forEach((t, i) => {
+      const border = hasAnyStmt || extras.length ? 'border-top:1px solid rgba(222,214,190,0.5)' : '';
+      html += `<div class="${i > 0 ? 'mt-2 ' : ''}pt-2" style="${border}"><p style="color:#1B1510;font-weight:500;font-style:italic;line-height:1.625">${esc(t)}</p></div>`;
+    });
+
+    html += '</div>';
+    return html;
+  };
+
+  const stripOptLabel = (t) => t.replace(/^\(?[a-d]\)?\s*\)?\s*/, '').trim();
+
+  const extractOptions = ($el, $) => {
+    const opts = { a: '', b: '', c: '', d: '' };
+    const letters = ['a', 'b', 'c', 'd'];
+    $el.find('[data-options-list] [data-option], .options-list .option-item[data-option]').each((_, e) => {
+      const letter = $(e).attr('data-option')?.toLowerCase();
+      if (letters.includes(letter)) opts[letter] = stripOptLabel($(e).text().trim());
+    });
+    if (!opts.a) {
+      $el.find('[data-options-list] li, .options-list .option-item').each((i, e) => {
+        if (i < 4) opts[letters[i]] = stripOptLabel($(e).text().trim());
+      });
+    }
+    return opts;
+  };
+
+  const questions = [];
+  $q('.ata-question-item, [data-question-item], .question-item').each((_, el) => {
+    const $el = $q(el);
+    const qNo = parseInt($el.attr('data-question-number') || $el.attr('data-question-no'));
+    if (!qNo) return;
+
+    const stem = buildStem($el, $q);
+    const options = extractOptions($el, $q);
+
+    questions.push({
+      questionNumber: qNo,
+      questionText: stem,
+      options,
+      questionType: detectQuestionType(stem)
+    });
+  });
+
+  const buildExplanation = (answer, justification, elimNote) => {
+    const parts = [];
+    if (answer) parts.push(`<div style="color:#a63a3a;font-weight:600;font-size:1rem;margin-bottom:0.5rem">Answer: (${answer.toLowerCase()})</div>`);
+    if (justification) parts.push(`<div style="color:#1B1510;line-height:1.625">${esc(justification)}</div>`);
+    if (elimNote) parts.push(`<div style="color:#5C4D3C;font-size:0.875rem;font-style:italic;margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid rgba(222,214,190,0.5)">${esc(elimNote)}</div>`);
+    return parts.join('\n');
+  };
+
+  // Parse solutions
+  const solutionMap = new Map();
+
+  $s('[data-solution-item]').each((_, el) => {
+    const $el = $s(el);
+    const qNo = parseInt($el.attr('data-question-number'));
+    if (!qNo) return;
+    let answer = ($el.attr('data-answer') || '').toUpperCase();
+    if (!answer) {
+      const line = $el.find('[data-answer-line]').text().trim();
+      const m = line.match(/\(?([a-d])\)?/i);
+      if (m) answer = m[1].toUpperCase();
+    }
+    const justification = $el.find('[data-justification]').text().trim();
+    const elimNote = $el.find('[data-elimination-note]').text().trim();
+    const explanation = buildExplanation(answer, justification, elimNote);
+    solutionMap.set(qNo, { correctAnswer: answer, explanation });
+  });
+
+  $s('.ata-question-item').each((_, el) => {
+    const $el = $s(el);
+    const qNo = parseInt($el.attr('data-question-no'));
+    if (!qNo || solutionMap.has(qNo)) return;
+    const answer = ($el.find('[data-answer]').text().trim() || '').toUpperCase();
+    const raw = $el.find('[data-explanation]').html()?.trim();
+    const explanation = raw ? `<div style="color:#1B1510;line-height:1.625">${raw}</div>` : '';
+    if (answer) solutionMap.set(qNo, { correctAnswer: answer, explanation });
+  });
+
+  return questions.map(q => {
+    const sol = solutionMap.get(q.questionNumber);
+    return {
+      ...q,
+      correctAnswer: sol?.correctAnswer || null,
+      explanation: sol?.explanation || ''
+    };
+  });
 };

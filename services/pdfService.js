@@ -12,6 +12,8 @@ import { File } from "node:buffer";
 import Tesseract from 'tesseract.js';
 import OpenAI from 'openai';
 import Jimp from 'jimp';
+import { formatQuestionTextToHTML } from '../utils/parser.js';
+import MockTest from '../models/MockTest.js';
 
 let groq = null;
 const getGroqClient = () => {
@@ -58,24 +60,6 @@ const getNvidiaClient = () => {
 const utapi = new UTApi({ token: process.env.UPLOADTHING_SECRET });
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-async function ensureLocalPath(filePathOrUrl) {
-    if (!filePathOrUrl.startsWith('http')) return filePathOrUrl;
-
-    console.log("[SERVICE] URL detected, downloading for AI analysis...");
-    const tempDir = path.join(__dirname, '../temp_uploads/tmp');
-    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-
-    const tempPath = path.join(tempDir, `ai_proc_${Date.now()}.pdf`);
-    const response = await axios({ url: filePathOrUrl, method: 'GET', responseType: 'stream' });
-    const writer = fs.createWriteStream(tempPath);
-    response.data.pipe(writer);
-
-    return new Promise((resolve, reject) => {
-        writer.on('finish', () => resolve(tempPath));
-        writer.on('error', reject);
-    });
-}
 
 // ========================== UPLOAD LOGIC ==========================
 
@@ -124,7 +108,6 @@ export async function uploadOnlyToUploadthing(filePath) {
 // ========================== QUESTION PAPER PROCESSING ==========================
 
 export async function extractQuestionPaperMap(pdfPathOrUrl) {
-    const { default: extractUPSCVisualMap } = await import('./pdfService.js');
     return extractUPSCVisualMap(pdfPathOrUrl);
 }
 
@@ -586,8 +569,6 @@ export async function streamPdfToResponse(filePathOrUrl, req, res) {
     }
 }
 
-import { formatQuestionTextToHTML } from '../utils/parser.js';
-
 export async function extractAndStoreQuestionText(mockTestId, testPdfUrl) {
     try {
         console.log(`[Question Text Extraction] Starting for MockTest ${mockTestId}`);
@@ -636,5 +617,4 @@ export async function extractAndStoreQuestionText(mockTestId, testPdfUrl) {
     }
 }
 
-// Import MockTest for extractAndStoreQuestionText
-import MockTest from '../models/MockTest.js';
+

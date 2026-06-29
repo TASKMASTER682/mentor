@@ -27,6 +27,7 @@ import subscriptionRoutes from './routes/subscription.js';
 import coursesRoutes from './routes/courses.js';
 import paymentRoutes from './routes/payments.js';
 import adminSettingsRoutes from './routes/adminSettings.js';
+import editorialEngineRoutes from './routes/editorialEngine.js';
 
 const app = express();
 const httpServer = createServer(app);
@@ -57,6 +58,7 @@ app.use('/api/courses', coursesRoutes);
 app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/settings', adminSettingsRoutes);
+app.use('/api/editorial-engine', editorialEngineRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date() }));
 
@@ -91,6 +93,7 @@ if (keepAliveUrl) {
     }
   });
 }
+
 
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/upsc-pos')
   .then(() => {

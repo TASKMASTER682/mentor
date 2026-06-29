@@ -16,7 +16,7 @@ const testSeriesSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   name: { type: String, required: true },
   provider: String,
-  type: { type: String, enum: ['prelims', 'mains', 'sectional', 'full_length', 'csat'], required: true },
+  type: { type: String, enum: ['prelims_gs', 'prelims_csat', 'mains_gs', 'sectional', 'full_length', 'optional'], required: true },
   totalTests: Number,
   isActive: { type: Boolean, default: true },
   attempts: [testAttemptSchema],

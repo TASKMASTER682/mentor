@@ -692,7 +692,7 @@ All values must be plain strings.`
 Your goal is to reformat ONLY the tabular or paired data part into a perfect HTML table.
 Return the ENTIRE question text, with the list/pairs perfectly formatted into an HTML <table>.
 Maintain all text outside the table as standard HTML paragraphs <p>.
-Add sleek styling to your table and cells using Tailwind classes similar to "border border-ink-800 text-sm text-left p-3". Make it look beautiful and readable in a dark mode UI.
+Add sleek styling to your table and cells using Tailwind classes similar to "border border-ink-600 text-sm text-left p-3 bg-ink-900/40". Make it look beautiful and readable in a dark mode UI.
 Do not wrap your output in markdown code blocks (\`\`\`html) - return ONLY the raw HTML string.`
         }, {
           role: 'user',
@@ -731,9 +731,9 @@ GUIDELINES:
 OUTPUT FORMAT:
 Return a clean HTML structure:
 - Wrap the Header in <h3 classname="text-lg font-bold text-white mb-4">.
-- Wrap statements in a bg-slate-800/40 p-4 rounded border-l-4 border-yellow-500 container.
-- Use text-yellow-400 font-bold for numbering (1, 2, 3
-- Wrap the Tail Phrase in a separate <p classname="mt-4 pt-2 border-t border-gray-700 italic text-white font-medium">.
+- Wrap statements in a bg-ink-900/60 p-4 rounded border-l-4 border-red-500 container.
+- Use text-red-400 font-bold for numbering (1, 2, 3
+- Wrap the Tail Phrase in a separate <p classname="mt-4 pt-2 border-t border-ink-600 italic text-white font-medium">.
 
 Return ONLY the raw HTML string without markdown code blocks.`
         }, {

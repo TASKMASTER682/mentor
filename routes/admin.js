@@ -8,12 +8,27 @@ import User from '../models/User.js';
 import UserSubscription from '../models/UserSubscription.js';
 import SubscriptionPlan from '../models/SubscriptionPlan.js';
 import UserCourseEnrollment from '../models/UserCourseEnrollment.js';
+import EditorialItem from '../models/EditorialItem.js';
+import { editorialRepeatAnalyzerService } from '../services/editorialRepeatAnalyzerService.js';
+import { scrapeSource } from '../services/harvesterService.js';
 
 const router = express.Router();
 
 router.use(requireAdmin);
 
 import os from 'os';
+
+const VALID_SOURCES = ['vajiram', 'pw', 'legacyias', 'greaterkashmir'];
+
+const toRunDateKey = (d) => {
+  if (!d) return new Date().toISOString().slice(0, 10);
+  const dt = new Date(d);
+  if (Number.isNaN(dt.getTime())) return new Date().toISOString().slice(0, 10);
+  const yyyy = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+};
 
 router.get('/stats', async (req, res) => {
   try {
@@ -746,6 +761,102 @@ router.get('/subscription/stats', async (req, res) => {
       expired: expiredSubscriptions,
       revenue: totalRevenue[0]?.total || 0
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== ARTICLES (Scraper Integration) ====================
+
+async function scrapeAndSave(source, mode, userId) {
+  const result = await scrapeSource(source, mode);
+
+  if (!result.success) {
+    return { success: false, error: result.error, code: result.code || 'SCRAPER_ERROR' };
+  }
+
+  const articles = result.articles;
+  const runDateKey = result.stats?.harvest_date || new Date().toISOString().slice(0, 10);
+
+  if (!articles || articles.length === 0) {
+    return { success: true, savedCount: 0, runDateKey, analysis: null };
+  }
+
+  await EditorialItem.deleteMany({ userId, sourceKey: source, runDateKey });
+
+  let savedCount = 0;
+  for (const a of articles) {
+    const title = (a?.title || '').toString().trim();
+    const description = (a?.description || '').toString().trim();
+    const link = (a?.url || '').toString().trim();
+    const keyPointersContent = (a?.html || a?.content || '').toString().trim();
+    const publishedAt = toRunDateKey(a?.published_at || runDateKey);
+
+    if (!title || !link) continue;
+
+    await EditorialItem.create({
+      userId,
+      runDateKey,
+      sourcesKey: source,
+      sourceKey: source,
+      title,
+      description: description || a?.plain_text?.slice(0, 500) || '',
+      link,
+      keyPointersContent,
+      publishedAt: publishedAt ? new Date(publishedAt) : null,
+      fingerprint: `${title}|${link}`.slice(0, 250),
+    });
+    savedCount++;
+  }
+
+  const now = new Date();
+  const allItems = await EditorialItem.find({
+    userId,
+    runDateKey: { $gte: new Date(new Date(now).setMonth(now.getMonth() - 6)).toISOString().slice(0, 10) },
+  }).lean();
+
+  const analysis = await editorialRepeatAnalyzerService.generateAllWindows({
+    userId,
+    generatedForDateKey: runDateKey,
+    items: allItems,
+  });
+
+  return { success: true, savedCount, runDateKey, analysis };
+}
+
+router.post('/articles/load-today/:source', async (req, res) => {
+  try {
+    const { source } = req.params;
+    if (!VALID_SOURCES.includes(source)) {
+      return res.status(400).json({ error: `Invalid source '${source}'. Valid: ${VALID_SOURCES.join(', ')}` });
+    }
+
+    const result = await scrapeAndSave(source, 'today', req.user._id);
+
+    if (!result.success) {
+      return res.status(503).json({ error: result.error, code: result.code });
+    }
+
+    res.json({ success: true, source, mode: 'today', savedCount: result.savedCount, runDateKey: result.runDateKey });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/articles/load-yesterday/:source', async (req, res) => {
+  try {
+    const { source } = req.params;
+    if (!VALID_SOURCES.includes(source)) {
+      return res.status(400).json({ error: `Invalid source '${source}'. Valid: ${VALID_SOURCES.join(', ')}` });
+    }
+
+    const result = await scrapeAndSave(source, 'yesterday', req.user._id);
+
+    if (!result.success) {
+      return res.status(503).json({ error: result.error, code: result.code });
+    }
+
+    res.json({ success: true, source, mode: 'yesterday', savedCount: result.savedCount, runDateKey: result.runDateKey });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
