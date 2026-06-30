@@ -8,19 +8,14 @@ import MockTest from '../models/MockTest.js';
 import TestAttempt from '../models/TestAttempt.js';
 import User from '../models/User.js';
 import {
-  extractUPSCVisualMap,
   streamPdfToResponse,
-  extractAnswerKeyFromSolutionPdf,
-  extractQuestionPaperMap,
-  uploadFileToUploadthing,
-  extractAndStoreQuestionText,
-  processTestPaperImages
+  uploadFileToUploadthing
 } from '../services/pdfService.js';
 import { aiService } from '../services/aiService.js';
 import { calculateScore } from '../services/scoringService.js';
 import { UTApi } from "uploadthing/server";
 import Question from '../models/Question.js';
-import { parseQuestions, parseSolutions, mapQuestionsAndSolutions, extractAnswersRegex, parseQuestionsFromHTML } from '../utils/parser.js';
+import { extractAnswersRegex, parseMarkers } from '../utils/parser.js';
 
 
 const utapi = new UTApi({ token: process.env.UPLOADTHING_SECRET });
@@ -248,41 +243,39 @@ router.post('/upload', uploadPDFs, async (req, res) => {
   }
 });
 
-// Admin only - Structured upload
-router.post('/upload-structured', requireAdmin, async (req, res) => {
+
+
+// POST /mock-tests/upload-structured-markers — Marker-based structured upload
+router.post('/upload-structured-markers', requireAdmin, async (req, res) => {
   const t0 = Date.now();
   try {
     const {
       name, subject, testType, totalQuestions, durationMinutes,
-      markCorrect, markWrong, questionPaperText, solutionText, testSeriesId, year
+      markCorrect, markWrong, structuredText, testSeriesId, year
     } = req.body;
 
-    if (!questionPaperText || !solutionText) {
-      return res.status(400).json({ error: "Question paper and solution text are required" });
+    if (!structuredText || !structuredText.trim()) {
+      return res.status(400).json({ error: "Structured text is required" });
     }
 
-    const parsedQuestions = await parseQuestions(questionPaperText);
-    const parsedSolutions = parseSolutions(solutionText);
-    let mappedData = mapQuestionsAndSolutions(parsedQuestions, parsedSolutions);
-
-    if (!mappedData || mappedData.length === 0) {
-      return res.status(400).json({ error: "No questions could be parsed. Please check the format (Q.1) ... a) b) c) d))" });
+    const parsedData = parseMarkers(structuredText);
+    if (!parsedData || parsedData.length === 0) {
+      return res.status(400).json({ error: "No questions could be parsed. Use markers like [Q], [O_a], [ANS], [EXP], [NEXT]" });
     }
 
-    // 2. Validate & normalize all questions
     const validQuestions = [];
-    for (const qData of mappedData) {
-      const qText = (qData.questionText || qData.question || '').trim();
+    for (const qData of parsedData) {
+      const qText = qData.questionText?.trim();
       const qNum = qData.questionNumber;
       const qOpts = qData.options;
       const qCorrect = String(qData.correctAnswer || '').toUpperCase().trim();
 
-      if (!qText || !qOpts || !qNum) {
-        console.warn(`[Structured Upload] Skipping Q${qNum || '?'} — missing text/options. qText:`, !!qText, "qOpts:", !!qOpts, "qNum:", qNum);
+      if (!qText || !qNum) {
+        console.warn(`[Marker Structured] Skipping Q${qNum || '?'} — missing text`);
         continue;
       }
       if (!['A', 'B', 'C', 'D'].includes(qCorrect)) {
-        console.warn(`[Structured Upload] Skipping Q${qNum} — invalid answer "${qCorrect}"`);
+        console.warn(`[Marker Structured] Skipping Q${qNum} — invalid answer "${qCorrect}"`);
         continue;
       }
 
@@ -296,165 +289,24 @@ router.post('/upload-structured', requireAdmin, async (req, res) => {
           d: qOpts.d || 'Option D',
         },
         correctAnswer: qCorrect,
-        explanation: (qData.explanation || qData.solution || '').trim(),
+        explanation: (qData.explanation || '').trim(),
+        structure: qData.structure || null,
         subject: subject || 'General Studies',
         year: year || new Date().getFullYear()
       });
     }
 
     if (validQuestions.length === 0) {
-      console.log("[Structured Upload] No valid questions after validation");
       return res.status(400).json({ error: "No valid questions with correct answers were found." });
     }
-    
-    console.log("[Structured Upload] Valid questions:", validQuestions.length);
 
-    // 3. First create MockTest to get its ID (needed for question linking)
-    const answerKeyObject = {};
     const mockTest = new MockTest({
       userId: req.user._id,
       testSeriesId: testSeriesId || null,
       name: name || "Structured Test",
       testType: testType || 'prelims_gs',
-      subject,
-      year,
-      totalQuestions: totalQuestions || validQuestions.length,
-      durationMinutes: durationMinutes || 120,
-      markCorrect: markCorrect || 2.0,
-      markWrong: markWrong || -0.66,
-      mode: 'structured',
-      structuredQuestions: [],
-      answerKey: {},
-      answerKeyCount: 0,
-      status: 'ready',
-      questionTextExtractionStatus: 'completed',
-      testPdfPath: "NOT_APPLICABLE"
-    });
-    await mockTest.save();
-    
-    const mockTestId = mockTest._id;
-
-    // 4. BULK UPSERT — single MongoDB call with mockTestId linking
-    const t1 = Date.now();
-    const bulkOps = validQuestions.map(q => ({
-      updateOne: {
-        filter: { text: q.text },           // find by exact text (dedup)
-        update: {
-          $setOnInsert: {           // only insert if new
-            questionNumber: q.questionNumber,
-            text: q.text,
-            options: q.options,
-            correctAnswer: q.correctAnswer,
-            explanation: q.explanation,
-            subject: q.subject,
-            year: q.year,
-            mockTestId: mockTestId
-          }
-        },
-        upsert: true
-      }
-    }));
-
-    await Question.bulkWrite(bulkOps, { ordered: false });
-
-    // 5. Fetch the IDs (both new and existing)
-    const questionTexts = validQuestions.map(q => q.text);
-    const savedQuestions = await Question.find({ text: { $in: questionTexts } }).select('_id text questionNumber');
-
-    // Build answer key map and update question IDs
-    const textToQ = new Map(validQuestions.map(q => [q.text, q]));
-    const questionIds = [];
-
-    for (const savedQ of savedQuestions) {
-      const original = textToQ.get(savedQ.text);
-      if (original) {
-        questionIds.push(savedQ._id);
-        answerKeyObject[String(original.questionNumber)] = original.correctAnswer;
-      }
-    }
-
-    // 6. Update MockTest with question IDs and answer key
-    await MockTest.findByIdAndUpdate(mockTestId, {
-      structuredQuestions: questionIds,
-      answerKey: answerKeyObject,
-      answerKeyCount: Object.keys(answerKeyObject).length
-    });
-
-    console.log(`[Structured Upload] DONE — ${validQuestions.length} questions, total time: ${Date.now() - t0}ms`);
-
-    res.status(201).json({
-      mockTestId: mockTest._id,
-      status: 'ready',
-      name: mockTest.name,
-      questionCount: validQuestions.length
-    });
-
-  } catch (err) {
-    console.error("Structured Upload Error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// POST /mock-tests/upload-structured-html — HTML-based structured upload using data-* attrs
-router.post('/upload-structured-html', requireAdmin, async (req, res) => {
-  const t0 = Date.now();
-  try {
-    const {
-      name: name, subject: _subject, testType, totalQuestions, durationMinutes,
-      markCorrect, markWrong, questionsHtml, solutionsHtml: _solutionsHtml, testSeriesId, year: _year
-    } = req.body;
-    const subject = _subject || 'General Studies';
-    const solutionsHtml = _solutionsHtml || '';
-    const year = _year || new Date().getFullYear();
-
-    if (!questionsHtml) {
-      return res.status(400).json({ error: "Questions HTML is required" });
-    }
-
-    const parsedData = parseQuestionsFromHTML(questionsHtml, solutionsHtml || '');
-
-    if (!parsedData || parsedData.length === 0) {
-      return res.status(400).json({ error: "No questions could be parsed. Use .ata-question-item with data-question-no." });
-    }
-
-    const validQuestions = [];
-    for (const qData of parsedData) {
-      const qText = qData.questionText?.trim();
-      const qNum = qData.questionNumber;
-      const qOpts = qData.options;
-      const qCorrect = String(qData.correctAnswer || '').toUpperCase().trim();
-
-      if (!qText || !qNum) {
-        console.warn(`[HTML Structured] Skipping Q${qNum || '?'} — missing text`);
-        continue;
-      }
-      if (qCorrect && !['A', 'B', 'C', 'D'].includes(qCorrect)) {
-        console.warn(`[HTML Structured] Skipping Q${qNum} — invalid answer "${qCorrect}"`);
-        continue;
-      }
-
-      validQuestions.push({
-        questionNumber: qNum,
-        text: qText,
-        options: qOpts?.a ? qOpts : { a: 'Option A', b: 'Option B', c: 'Option C', d: 'Option D' },
-        correctAnswer: qCorrect || null,
-        explanation: (qData.explanation || '').trim(),
-        subject: subject || 'General Studies',
-        year: year || new Date().getFullYear()
-      });
-    }
-
-    if (validQuestions.length === 0) {
-      return res.status(400).json({ error: "No valid questions parsed." });
-    }
-
-    const mockTest = new MockTest({
-      userId: req.user._id,
-      testSeriesId: testSeriesId || null,
-      name: name || "HTML Structured Test",
-      testType: testType || 'prelims_gs',
-      subject,
-      year,
+      subject: subject,
+      year: year,
       totalQuestions: totalQuestions || validQuestions.length,
       durationMinutes: durationMinutes || 120,
       markCorrect: markCorrect || 2.0,
@@ -480,6 +332,7 @@ router.post('/upload-structured-html', requireAdmin, async (req, res) => {
             options: q.options,
             correctAnswer: q.correctAnswer,
             explanation: q.explanation,
+            structure: q.structure,
             subject: q.subject,
             year: q.year,
             mockTestId: mockTest._id
@@ -510,7 +363,7 @@ router.post('/upload-structured-html', requireAdmin, async (req, res) => {
       answerKeyCount: Object.keys(answerKeyObject).length
     });
 
-    console.log(`[HTML Structured] DONE — ${validQuestions.length} questions, time: ${Date.now() - t0}ms`);
+    console.log(`[Marker Structured] DONE — ${validQuestions.length} questions, time: ${Date.now() - t0}ms`);
 
     res.status(201).json({
       mockTestId: mockTest._id,
@@ -520,7 +373,7 @@ router.post('/upload-structured-html', requireAdmin, async (req, res) => {
     });
 
   } catch (err) {
-    console.error("HTML Structured Upload Error:", err);
+    console.error("Marker Structured Upload Error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -535,16 +388,22 @@ router.get('/attempts/:attemptId', async (req, res) => {
     // If options missing in userAnswers, try to get from structuredQuestions
     if (attempt.mockTestId?.structuredQuestions) {
       const structuredOpts = {};
+      const structuredStructures = {};
       attempt.mockTestId.structuredQuestions.forEach((q) => {
         structuredOpts[q.questionNumber] = q.options;
+        structuredStructures[q.questionNumber] = q.structure || null;
       });
       
-      // Enrich userAnswers with options if missing
+      // Enrich userAnswers with options & structure if missing
       attempt.userAnswers = attempt.userAnswers.map((ua) => {
+        const enriched = { ...ua };
         if (!ua.options && structuredOpts[ua.questionNumber]) {
-          return { ...ua, options: structuredOpts[ua.questionNumber] };
+          enriched.options = structuredOpts[ua.questionNumber];
         }
-        return ua;
+        if (!ua.structure && structuredStructures[ua.questionNumber]) {
+          enriched.structure = structuredStructures[ua.questionNumber];
+        }
+        return enriched;
       });
     }
     res.json(attempt);
@@ -574,6 +433,7 @@ router.post('/:id/submit', async (req, res) => {
     const questionTextMap = new Map();
     const explanationMap = new Map();
     const optionsMap = new Map();
+    const structureMap = new Map();
 
     if (mockTest.mode === 'structured') {
       const populatedTest = await MockTest.findById(mockTest._id).populate('structuredQuestions');
@@ -582,6 +442,7 @@ router.post('/:id/submit', async (req, res) => {
         questionTextMap.set(q.questionNumber, q.text);
         explanationMap.set(q.questionNumber, q.explanation);
         optionsMap.set(q.questionNumber, q.options);
+        structureMap.set(q.questionNumber, q.structure || null);
       });
     } else if (mockTest.questions) {
       mockTest.questions.forEach(q => {
@@ -596,7 +457,8 @@ router.post('/:id/submit', async (req, res) => {
       ...ans,
       questionText: questionTextMap.get(ans.questionNumber) || "",
       explanation: explanationMap.get(ans.questionNumber) || "",
-      options: optionsMap.get(ans.questionNumber) || null
+      options: optionsMap.get(ans.questionNumber) || null,
+      structure: structureMap.get(ans.questionNumber) || null
     }));
 
     // No need to enrich with imageUrls
@@ -734,183 +596,11 @@ router.post('/cleanup-questions', requireAdmin, async (req, res) => {
 
 
 
-async function processTestAndAnswerKey(mockTestId, testPdfPath, solutionPdfPath, totalQ) {
-  try {
-    // --- STEP 1: Process Test Paper - Crop Questions into Images FIRST (before upload deletes the file) ---
-    // console.log("[Visual] Starting question image processing...");
-    const questionsData = await processTestPaperImages(testPdfPath, totalQ, mockTestId);
-    // console.log(`[Visual] Processed ${questionsData.length} question images`);
-
-    // --- STEP 2: Upload Test PDF to Cloud ---
-    const testUpload = await uploadFileToUploadthing(testPdfPath, false); // false = don't delete yet
-    const testCloudUrl = testUpload?.url;
-    console.log(`[Visual] Test PDF upload:`, testUpload ? 'success' : 'FAILED');
-
-    if (!testCloudUrl) {
-      throw new Error("Test PDF upload failed");
-    }
-
-    // --- STEP 3: Extract Answer Key from Solution PDF (AI-based) ---
-    console.log("[Visual] Extracting answer key...");
-    let regexParsed = {};
-    let answerKeySection = '';
-    
-    try {
-      const result = await extractAnswerKeyFromSolutionPdf(solutionPdfPath);
-      regexParsed = result.regexParsed;
-      answerKeySection = result.answerKeySection;
-    } catch (extractErr) {
-      if (extractErr.message === 'VISION_MODEL_NOT_SUPPORTED') {
-        console.log("[Visual] Vision API failed, using regex fallback...");
-        // Read solution PDF text directly for regex parsing
-        const fs = await import('fs');
-        const { extractAnswersRegex } = await import('../utils/parser.js');
-        const solutionText = fs.readFileSync(solutionPdfPath, 'utf-8').substring(0, 50000);
-        regexParsed = extractAnswersRegex(solutionText);
-        answerKeySection = Object.entries(regexParsed).slice(0, 50).map(([k, v]) => `${k}: ${v}`).join(', ');
-      } else {
-        throw extractErr;
-      }
-    }
-    
-    const finalKey = await aiService.parseAnswerKeyFromText({ answerKeySection, regexParsed, totalQuestions: totalQ });
-
-    // --- STEP 4: Map answers to questions ---
-    const keyEntries = Object.entries(finalKey).filter(([k, v]) => !isNaN(parseInt(k)));
-    const answerKeyMap = new Map(keyEntries.map(([k, v]) => [String(k), String(v).toUpperCase()]));
-
-    // Update questions with correct answers
-    const updatedQuestions = questionsData.map(q => {
-      const correctAnswer = answerKeyMap.get(String(q.questionNumber)) || null;
-      return {
-        ...q,
-        correctAnswer: correctAnswer
-      };
-    });
-
-    // --- STEP 5: Save to Database ---
-    await MockTest.findByIdAndUpdate(mockTestId, {
-      testPdfPath: testCloudUrl,
-      testPdfKey: testUpload.key,
-      questions: updatedQuestions,
-      answerKey: answerKeyMap,
-      answerKeyCount: answerKeyMap.size,
-      status: 'ready',
-      questionTextExtractionStatus: 'completed'
-    });
-
-    // Cleanup - files may already be deleted by upload function
-    if (fs.existsSync(testPdfPath)) {
-      try { fs.unlinkSync(testPdfPath); } catch (e) { }
-    }
-    if (fs.existsSync(solutionPdfPath)) {
-      try { fs.unlinkSync(solutionPdfPath); } catch (e) { }
-    }
-
-    console.log(`[Visual] Processing complete for MockTest ${mockTestId}`);
-
-  } catch (err) {
-    console.error("[Visual] Processing error:", err);
-    if (fs.existsSync(testPdfPath)) {
-      try { fs.unlinkSync(testPdfPath); } catch (e) { }
-    }
-    if (fs.existsSync(solutionPdfPath)) {
-      try { fs.unlinkSync(solutionPdfPath); } catch (e) { }
-    }
-    throw err;
-  }
-}
 
 
 
-async function processTestWithTextAnswerKey(mockTestId, testPdfPath, answerKeyText, totalQ) {
-  try {
-    // --- STEP 1: Process Test Paper - Crop Questions into Images ---
-    // console.log("[Visual] Starting question image processing...");
-    const questionsData = await processTestPaperImages(testPdfPath, totalQ, mockTestId);
-    // console.log(`[Visual] Processed ${questionsData.length} question images`);
 
-    // --- STEP 2: Upload Test PDF to Cloud ---
-    const testUpload = await uploadFileToUploadthing(testPdfPath, false);
-    const testCloudUrl = testUpload?.url;
-    console.log(`[Visual] Test PDF upload:`, testUpload ? 'success' : 'FAILED');
 
-    if (!testCloudUrl) {
-      throw new Error("Test PDF upload failed");
-    }
-
-    // --- STEP 3: Parse Answer Key from Raw Text (AI-based) ---
-    // console.log("[Visual] Parsing answer key from text...");
-    // console.log("[Visual] Raw answer key text:", answerKeyText.substring(0, 500));
-
-    // Use AI service to parse the raw text answer key
-    const finalKey = await aiService.parseAnswerKeyFromText({
-      answerKeySection: answerKeyText,
-      regexParsed: {},
-      totalQuestions: totalQ
-    });
-
-    // console.log("[Visual] AI parsed answer key:", JSON.stringify(finalKey));
-
-    // --- STEP 4: Normalize answer keys (handle Q1, Q2, etc.) ---
-    const normalizedKey = {};
-    Object.entries(finalKey).forEach(([k, v]) => {
-      // Extract just the number from keys like "Q1", "1", "Q 1"
-      const questionNum = String(k).replace(/Q\s*/i, '').trim();
-      if (!isNaN(parseInt(questionNum))) {
-        normalizedKey[questionNum] = String(v).toUpperCase().replace(/[^ABCD]/g, '');
-      }
-    });
-
-    console.log("[Visual] Normalized answer key:", JSON.stringify(normalizedKey));
-
-    // --- STEP 5: Map answers to questions ---
-    const keyEntries = Object.entries(normalizedKey).filter(([k, v]) => !isNaN(parseInt(k)));
-    const answerKeyMap = new Map(keyEntries.map(([k, v]) => [String(k), v]));
-
-    // console.log(`[Visual] Final answer key map:`, Object.fromEntries(answerKeyMap));
-
-    // Update questions with correct answers
-    const updatedQuestions = questionsData.map(q => {
-      const correctAnswer = answerKeyMap.get(String(q.questionNumber)) || null;
-      if (!correctAnswer) {
-        console.log(`[Visual] WARNING: No answer found for Q${q.questionNumber}`);
-      }
-      return {
-        ...q,
-        correctAnswer: correctAnswer
-      };
-    });
-
-    const questionsWithAnswers = updatedQuestions.filter(q => q.correctAnswer).length;
-    // console.log(`[Visual] Questions with answers: ${questionsWithAnswers}/${updatedQuestions.length}`);
-
-    // --- STEP 5: Save to Database ---
-    await MockTest.findByIdAndUpdate(mockTestId, {
-      testPdfPath: testCloudUrl,
-      testPdfKey: testUpload.key,
-      questions: updatedQuestions,
-      answerKey: answerKeyMap,
-      answerKeyCount: answerKeyMap.size,
-      status: 'ready',
-      questionTextExtractionStatus: 'completed'
-    });
-
-    // Cleanup
-    if (fs.existsSync(testPdfPath)) {
-      try { fs.unlinkSync(testPdfPath); } catch (e) { }
-    }
-
-    console.log(`[Visual] Processing complete for MockTest ${mockTestId}`);
-
-  } catch (err) {
-    console.error("[Visual] Processing error:", err);
-    if (fs.existsSync(testPdfPath)) {
-      try { fs.unlinkSync(testPdfPath); } catch (e) { }
-    }
-    throw err;
-  }
-}
 
 
 

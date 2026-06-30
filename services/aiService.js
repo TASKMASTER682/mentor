@@ -4,7 +4,6 @@ import DailyTracker from '../models/DailyTracker.js';
 import Mission from '../models/Mission.js';
 import TestAttempt from '../models/TestAttempt.js'
 import LibrarySource from '../models/LibrarySource.js';
-import { extractUPSCVisualMap, extractTextFromQuestionImage } from './pdfService.js';
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
@@ -221,27 +220,6 @@ Generate a JSON strategy with: priority (high/medium/low), approach (string desc
       return match ? JSON.parse(match[0]) : fallbackParseSyllabus(syllabusText);
     } catch (err) {
       return fallbackParseSyllabus(syllabusText);
-    }
-  },
-
-  async parseAnswerKeyFromText({ answerKeySection, totalQuestions }) {
-    try {
-      const response = await getGroqClient().chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [{
-          role: 'system',
-          content: 'Extract UPSC answer key into JSON: {"1": "A", "2": "C"}. Only JSON output.'
-        }, {
-          role: 'user',
-          content: `Text: ${answerKeySection}`
-        }],
-        temperature: 0.1
-      });
-      const text = response.choices[0].message.content.trim();
-      const match = text.match(/\{[\s\S]*\}/);
-      return match ? JSON.parse(match[0]) : {};
-    } catch (err) {
-      return {};
     }
   },
 
@@ -612,150 +590,4 @@ All values must be plain strings.`
       return null;
     }
   },
-
-  async intelligentParseExam({ questionText, solutionText, subject }) {
-    try {
-      const response = await getGroqClient().chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-          {
-            role: 'system',
-            content: `You are an expert UPSC Exam Parser. 
-            Analyze the provided raw question paper text and solution/explanation text carefully.
-            
-            GOAL: Extract a perfectly structured question bank.
-            
-            INSTRUCTIONS:
-            1. OBJECT MAPPING: Every question must be correctly paired with its corresponding solution using the question number.
-            2. CLEANING: 
-               - Remove headers, footers, page numbers.
-               - Strip watermarks or noise like "100%, 75%".
-               - Fix OCR artifacts (e.g., "0" instead of "D" if it's an option).
-            3. FORMATTING: 
-               - Preserve mathematical notations, indented lists, or quotes within questionText.
-               - Ensure options (a, b, c, d) are cleanly separated.
-            4. CORRECTNESS: 
-               - The "correctAnswer" must be EXACTLY one of: "A", "B", "C", "D".
-               - The "explanation" must be comprehensive, including any factual references or logic provided in the solution text.
-            5. HANDLING EDGE CASES:
-               - If a question has more than 4 options, try to merge the extra into the question text or ignore.
-               - If no explicit "Ans)" marker exists, deduce the answer from the explanation context.
-            
-            OUTPUT SCHEMA (Strictly JSON Array of Objects):
-            [
-              {
-                "questionNumber": number,
-                "question": "Full multi-line question text here",
-                "options": {
-                  "a": "text for option a",
-                  "b": "text for option b",
-                  "c": "text for option c",
-                  "d": "text for option d"
-                },
-                "correctAnswer": "A",
-                "solution": "Full detailed explanation text here"
-              }
-            ]`
-
-          },
-          {
-            role: 'user',
-            content: `SUBJECT: ${subject}\n\nQUESTION PAPER TEXT:\n${questionText}\n\nSOLUTION/ANSWER KEY TEXT:\n${solutionText}`
-          }
-        ],
-        response_format: { type: "json_object" },
-        max_tokens: 8000,
-        temperature: 0.1
-      });
-
-      const text = response.choices[0].message.content.trim();
-      const parsed = tryParseJSON(text);
-
-      // The AI might return { "questions": [...] } or just the array
-      if (parsed && Array.isArray(parsed)) return parsed;
-      if (parsed && parsed.questions && Array.isArray(parsed.questions)) return parsed.questions;
-
-      return null;
-    } catch (err) {
-      console.error('Intelligent Parse Error:', err);
-      return null;
-    }
-  },
-
-  async formatTableQuestion(questionText) {
-    try {
-      const response = await getOpenAIClient().chat.completions.create({
-        model: 'meta/llama-3.1-405b-instruct',
-        messages: [{
-          role: 'system',
-          content: `You are an expert UPSC parser. The user will provide a match-the-column or pairs-based question.
-Your goal is to reformat ONLY the tabular or paired data part into a perfect HTML table.
-Return the ENTIRE question text, with the list/pairs perfectly formatted into an HTML <table>.
-Maintain all text outside the table as standard HTML paragraphs <p>.
-Add sleek styling to your table and cells using Tailwind classes similar to "border border-ink-600 text-sm text-left p-3 bg-ink-900/40". Make it look beautiful and readable in a dark mode UI.
-Do not wrap your output in markdown code blocks (\`\`\`html) - return ONLY the raw HTML string.`
-        }, {
-          role: 'user',
-          content: questionText
-        }],
-        temperature: 0.1
-      });
-      let html = response.choices[0].message.content.trim();
-      if (html.startsWith('```html')) {
-        html = html.replace(/^```html|```$/g, '').trim();
-      } else if (html.startsWith('```')) {
-        html = html.replace(/^```|```$/g, '').trim();
-      }
-      return html;
-    } catch (err) {
-      console.error('AI Table Formatting Error:', err);
-      return null;
-    }
-  },
-
-  async formatComplexQuestion(questionText, statements) {
-    try {
-      const response = await getOpenAIClient().chat.completions.create({
-        model: 'meta/llama-3.1-405b-instruct',
-        messages: [{
-          role: 'system',
-          content: `You are an expert UPSC question formatter. 
-Your task is to take a raw question text that contains statements and an instruction phrase (like "Which of the statements above is correct?").
-
-GUIDELINES:
-1. Identify the Main Header: The text before any statements start.
-2. Identify the Statements: Usually numbered 1, 2, 3 or labeled Statement-I, II, etc.
-3. Identify the Tail Phrase: The final question/instruction (e.g., "Select the correct answer...", "How many of the above...").
-4. IMPORTANT: Do NOT repeat the tail phrase in the header or statements. Remove any duplicate text.
-
-OUTPUT FORMAT:
-Return a clean HTML structure:
-- Wrap the Header in <h3 classname="text-lg font-bold text-white mb-4">.
-- Wrap statements in a bg-ink-900/60 p-4 rounded border-l-4 border-red-500 container.
-- Use text-red-400 font-bold for numbering (1, 2, 3
-- Wrap the Tail Phrase in a separate <p classname="mt-4 pt-2 border-t border-ink-600 italic text-white font-medium">.
-
-Return ONLY the raw HTML string without markdown code blocks.`
-        }, {
-          role: 'user',
-          content: `Question Text: ${questionText}\nStatements Data: ${JSON.stringify(statements)}`
-        }],
-        temperature: 0.1
-      });
-
-      let html = response.choices[0].message.content.trim();
-      
-      // Clean markdown if AI includes it
-      if (html.startsWith('```html')) {
-        html = html.replace(/^```html|```$/g, '').trim();
-      } else if (html.startsWith('```')) {
-        html = html.replace(/^```|```$/g, '').trim();
-      }
-      
-      return html;
-    } catch (err) {
-      console.error('AI Complex Formatting Error:', err);
-      return null;
-    }
-  }
 };

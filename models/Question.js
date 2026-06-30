@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 
 const questionSchema = new mongoose.Schema({
     questionNumber: { type: Number, required: true },
-    text: { type: String, required: true, unique: true }, // For exact match duplicate detection
+    text: { type: String, required: true, unique: true },
     options: {
         a: { type: String, required: true },
         b: { type: String, required: true },
@@ -11,6 +11,7 @@ const questionSchema = new mongoose.Schema({
     },
     correctAnswer: { type: String, enum: ['A', 'B', 'C', 'D'], required: true },
     explanation: { type: String, default: "" },
+    structure: { type: mongoose.Schema.Types.Mixed, default: null },
     subject: { type: String, required: true },
     year: { type: Number },
     topics: [{ type: String }],
