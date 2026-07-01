@@ -15,7 +15,7 @@ export const extractAnswersRegex = (text) => {
 export const parseMarkers = (rawText) => {
     if (!rawText || !rawText.trim()) return [];
 
-    const ALL_MARKERS = ['CONTEXT','Q','ST-START','ST-END','MATCH-START','MATCH-END','SUB-Q','O_a','O_b','O_c','O_d','ANS','EXP','NEXT'];
+    const ALL_MARKERS = ['CONTEXT','Q','ST-START','ST-END','MATCH-START','MATCH-END','SUB-Q','O_a','O_b','O_c','O_d','ANS','EXP','SUBJ','NEXT'];
 
     const blocks = rawText.split('[NEXT]').map(b => b.trim()).filter(Boolean);
     const questions = [];
@@ -30,6 +30,7 @@ export const parseMarkers = (rawText) => {
             return m ? m[1].trim() : '';
         };
 
+        const subject = extract('SUBJ');
         const context = extract('CONTEXT');
         const questionStem = extract('Q');
         const subQuestion = extract('SUB-Q');
@@ -87,6 +88,7 @@ export const parseMarkers = (rawText) => {
             options,
             correctAnswer,
             explanation,
+            subject: subject || undefined,
             structure,
             questionType: hasMatchPairs ? 'table_match' : 'regular_mcq'
         });

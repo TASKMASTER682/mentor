@@ -300,6 +300,122 @@ router.post('/create-test-from-questions', async (req, res) => {
   }
 });
 
+router.post('/auto-generate-test', async (req, res) => {
+  try {
+    const { totalQuestions, subjectDistribution, dateFrom, dateTo, name, testType, year, durationMinutes, markCorrect, markWrong, testSeriesId, subject } = req.body;
+    const total = parseInt(totalQuestions);
+    if (!total || total < 1) return res.status(400).json({ error: 'Invalid question count' });
+
+    // Build base filter
+    const filter = {};
+    if (dateFrom || dateTo) {
+      filter.createdAt = {};
+      if (dateFrom) filter.createdAt.$gte = new Date(dateFrom);
+      if (dateTo) filter.createdAt.$lte = new Date(dateTo);
+    }
+
+    // For each subject with a percentage, compute target count and fetch random questions
+    const selectedQuestionIds = [];
+    const subjects = Object.keys(subjectDistribution || {});
+    const subjectAllQuestions = {};
+
+    // Fetch pool per subject (date-filtered)
+    for (const sub of subjects) {
+      const pct = parseFloat(subjectDistribution[sub]) || 0;
+      if (pct <= 0) continue;
+      const subFilter = { ...filter, subject: sub };
+      const pool = await Question.find(subFilter).select('_id').lean();
+      if (pool.length > 0) subjectAllQuestions[sub] = pool;
+    }
+
+    // If no subject distribution, use all questions matching the date filter
+    if (Object.keys(subjectAllQuestions).length === 0) {
+      const pool = await Question.find(filter).select('_id').lean();
+      if (pool.length === 0) return res.status(400).json({ error: 'No questions found matching criteria' });
+      // Shuffle and pick
+      const shuffled = pool.sort(() => Math.random() - 0.5);
+      const picked = shuffled.slice(0, Math.min(total, shuffled.length));
+      selectedQuestionIds.push(...picked.map(q => q._id.toString()));
+    } else {
+      // Calculate count per subject based on percentages
+      const totalPct = subjects.reduce((sum, s) => sum + (parseFloat(subjectDistribution[s]) || 0), 0);
+      let remaining = total;
+      for (const sub of subjects) {
+        const pct = parseFloat(subjectDistribution[sub]) || 0;
+        if (pct <= 0) continue;
+        let count = Math.round((pct / totalPct) * total);
+        count = Math.min(count, subjectAllQuestions[sub]?.length || 0);
+        const shuffled = (subjectAllQuestions[sub] || []).sort(() => Math.random() - 0.5);
+        const picked = shuffled.slice(0, count).map(q => q._id.toString());
+        selectedQuestionIds.push(...picked);
+        remaining -= picked.length;
+      }
+      // Distribute remaining questions among subjects that still have pool left
+      if (remaining > 0) {
+        for (const sub of subjects) {
+          if (remaining <= 0) break;
+          const unused = (subjectAllQuestions[sub] || []).filter(q => !selectedQuestionIds.includes(q._id.toString()));
+          const add = Math.min(remaining, unused.length);
+          selectedQuestionIds.push(...unused.slice(0, add).map(q => q._id.toString()));
+          remaining -= add;
+        }
+      }
+    }
+
+    if (selectedQuestionIds.length === 0) {
+      return res.status(400).json({ error: 'No questions could be selected' });
+    }
+
+    // Fetch full question docs
+    const questions = await Question.find({ _id: { $in: selectedQuestionIds } });
+
+    const mockTest = new MockTest({
+      userId: req.user._id,
+      testSeriesId: testSeriesId || null,
+      name: name || `Auto Test - ${new Date().toLocaleDateString()}`,
+      testType: testType || 'sectional',
+      subject: subject || 'General Studies',
+      year: year || new Date().getFullYear(),
+      topics: [],
+      totalQuestions: questions.length,
+      durationMinutes: durationMinutes || 60,
+      markCorrect: markCorrect || 2.0,
+      markWrong: markWrong || -0.66,
+      testPdfPath: 'NOT_APPLICABLE',
+      mode: 'structured',
+      status: 'ready',
+      structuredQuestions: questions.map(q => q._id),
+      questions: questions.map(q => ({
+        questionNumber: q.questionNumber,
+        text: q.text,
+        subject: q.subject,
+        topic: q.topics?.[0] || null,
+        correctAnswer: q.correctAnswer,
+        status: 'active'
+      }))
+    });
+
+    await mockTest.save();
+
+    const answerKeyObject = {};
+    questions.forEach((q, index) => {
+      answerKeyObject[String(index + 1)] = String(q.correctAnswer).toUpperCase();
+    });
+    mockTest.answerKey = answerKeyObject;
+    mockTest.answerKeyCount = Object.keys(answerKeyObject).length;
+    await mockTest.save();
+
+    res.status(201).json({
+      test: mockTest,
+      questionsCount: questions.length,
+      message: `Auto-generated test with ${questions.length} questions`
+    });
+  } catch (err) {
+    console.error('Auto-generate test error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==================== TEST SERIES ====================
 
 router.get('/series', async (req, res) => {

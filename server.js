@@ -28,6 +28,7 @@ import coursesRoutes from './routes/courses.js';
 import paymentRoutes from './routes/payments.js';
 import adminSettingsRoutes from './routes/adminSettings.js';
 import editorialEngineRoutes from './routes/editorialEngine.js';
+import quizRoutes from './routes/quiz.js';
 
 const app = express();
 const httpServer = createServer(app);
@@ -59,6 +60,7 @@ app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/settings', adminSettingsRoutes);
 app.use('/api/editorial-engine', editorialEngineRoutes);
+app.use('/api/quiz', quizRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date() }));
 

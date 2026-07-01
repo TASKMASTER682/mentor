@@ -251,7 +251,7 @@ router.post('/upload-structured-markers', requireAdmin, async (req, res) => {
   try {
     const {
       name, subject, testType, totalQuestions, durationMinutes,
-      markCorrect, markWrong, structuredText, testSeriesId, year
+      markCorrect, markWrong, structuredText, testSeriesId, year, type
     } = req.body;
 
     if (!structuredText || !structuredText.trim()) {
@@ -279,6 +279,7 @@ router.post('/upload-structured-markers', requireAdmin, async (req, res) => {
         continue;
       }
 
+      const qSubject = qData.subject || subject || 'General Studies';
       validQuestions.push({
         questionNumber: qNum,
         text: qText,
@@ -291,8 +292,9 @@ router.post('/upload-structured-markers', requireAdmin, async (req, res) => {
         correctAnswer: qCorrect,
         explanation: (qData.explanation || '').trim(),
         structure: qData.structure || null,
-        subject: subject || 'General Studies',
-        year: year || new Date().getFullYear()
+        subject: qSubject,
+        year: year || new Date().getFullYear(),
+        type: type || ''
       });
     }
 
@@ -305,7 +307,7 @@ router.post('/upload-structured-markers', requireAdmin, async (req, res) => {
       testSeriesId: testSeriesId || null,
       name: name || "Structured Test",
       testType: testType || 'prelims_gs',
-      subject: subject,
+      subject: subject || 'General Studies',
       year: year,
       totalQuestions: totalQuestions || validQuestions.length,
       durationMinutes: durationMinutes || 120,
@@ -335,6 +337,7 @@ router.post('/upload-structured-markers', requireAdmin, async (req, res) => {
             structure: q.structure,
             subject: q.subject,
             year: q.year,
+            type: q.type || type || '',
             mockTestId: mockTest._id
           }
         },

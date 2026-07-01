@@ -15,6 +15,7 @@ const questionSchema = new mongoose.Schema({
     subject: { type: String, required: true },
     year: { type: Number },
     topics: [{ type: String }],
+    type: { type: String, enum: ['pyq', 'non-pyq', ''], default: '' },
     isActive: { type: Boolean, default: true },
     mockTestId: { type: mongoose.Schema.Types.ObjectId, ref: 'MockTest', default: null }
 }, {
