@@ -45,7 +45,9 @@ router.get('/', authenticate, async (req, res) => {
         isEnrolled: !!enrollment || course.price === 0 || isAdmin,
         isOwned: !!enrollment,
         previewLessonId: previewLesson?._id,
-        previewVideoId: previewLesson?.videoId
+        previewVideoId: previewLesson?.videoId,
+        previewTelegramChannel: previewLesson?.telegramChannel,
+        previewTelegramMsgId: previewLesson?.telegramMsgId
       };
     }));
 
@@ -181,6 +183,8 @@ router.get('/:id/lesson/:lessonId/video', authenticate, async (req, res) => {
 
     res.json({
       videoId: lesson.videoId,
+      telegramChannel: lesson.telegramChannel,
+      telegramMsgId: lesson.telegramMsgId,
       title: lesson.title,
       duration: lesson.duration,
       courseId: course._id,

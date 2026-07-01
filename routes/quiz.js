@@ -25,7 +25,7 @@ router.get('/generate', authenticate, async (req, res) => {
     const questions = await Question.aggregate([
       { $match: filter },
       { $sample: { size: actualCount } },
-      { $project: { _id: 1, text: 1, options: 1, correctAnswer: 1, subject: 1, type: 1, explanation: 1 } }
+      { $project: { _id: 1, text: 1, options: 1, correctAnswer: 1, subject: 1, type: 1, explanation: 1, structure: 1 } }
     ]);
 
     res.json({ questions, total: actualCount });

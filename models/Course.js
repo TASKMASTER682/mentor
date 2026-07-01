@@ -22,7 +22,9 @@ const lessonSchema = new mongoose.Schema({
   courseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Course', required: true },
   title: { type: String, required: true },
   description: String,
-  videoId: { type: String, required: true },
+  videoId: { type: String }, // YouTube video ID (legacy)
+  telegramChannel: { type: String }, // Telegram channel username or chat ID
+  telegramMsgId: { type: String }, // Telegram message/post ID
   thumbnail: String,
   duration: String,
   durationSeconds: { type: Number, default: 0 },
