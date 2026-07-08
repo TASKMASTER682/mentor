@@ -9,8 +9,11 @@ import UserSubscription from '../models/UserSubscription.js';
 import SubscriptionPlan from '../models/SubscriptionPlan.js';
 import UserCourseEnrollment from '../models/UserCourseEnrollment.js';
 import EditorialItem from '../models/EditorialItem.js';
+import EditorialRepeatAnalysis from '../models/EditorialRepeatAnalysis.js';
 import { editorialRepeatAnalyzerService } from '../services/editorialRepeatAnalyzerService.js';
 import { scrapeSource } from '../services/harvesterService.js';
+import * as cheerio from 'cheerio';
+import ExcelJS from 'exceljs';
 
 const router = express.Router();
 
@@ -885,59 +888,52 @@ router.get('/subscription/stats', async (req, res) => {
 // ==================== ARTICLES (Scraper Integration) ====================
 
 async function scrapeAndSave(source, mode, userId) {
-  const result = await scrapeSource(source, mode);
+  try {
+    const result = await scrapeSource(source, mode);
 
-  if (!result.success) {
-    return { success: false, error: result.error, code: result.code || 'SCRAPER_ERROR' };
+    if (!result.success) {
+      return { success: false, error: result.error, code: result.code || 'SCRAPER_ERROR' };
+    }
+
+    const articles = result.articles;
+    const runDateKey = result.stats?.harvest_date || new Date().toISOString().slice(0, 10);
+
+    if (!articles || articles.length === 0) {
+      return { success: true, savedCount: 0, runDateKey, analysis: null };
+    }
+
+    await EditorialItem.deleteMany({ userId, sourceKey: source, runDateKey });
+
+    let savedCount = 0;
+    for (const a of articles) {
+      const title = (a?.title || '').toString().trim();
+      const description = (a?.description || '').toString().trim();
+      const link = (a?.url || '').toString().trim();
+      const keyPointersContent = (a?.html || a?.content || '').toString().trim();
+      const publishedAt = toRunDateKey(a?.published_at || runDateKey);
+
+      if (!title || !link) continue;
+
+      await EditorialItem.create({
+        userId,
+        runDateKey,
+        sourcesKey: source,
+        sourceKey: source,
+        title,
+        description: description || (typeof a?.plain_text === 'string' ? a.plain_text.slice(0, 500) : '') || '',
+        link,
+        keyPointersContent,
+        publishedAt: publishedAt ? new Date(publishedAt) : null,
+        fingerprint: `${title}|${link}`.slice(0, 250),
+      });
+      savedCount++;
+    }
+
+    return { success: true, savedCount, runDateKey };
+  } catch (err) {
+    console.error(`[scrapeAndSave] ${mode} error for ${source}:`, err?.stack || err?.message || err);
+    return { success: false, error: err?.message || String(err), code: 'SCRAPE_SAVE_ERROR' };
   }
-
-  const articles = result.articles;
-  const runDateKey = result.stats?.harvest_date || new Date().toISOString().slice(0, 10);
-
-  if (!articles || articles.length === 0) {
-    return { success: true, savedCount: 0, runDateKey, analysis: null };
-  }
-
-  await EditorialItem.deleteMany({ userId, sourceKey: source, runDateKey });
-
-  let savedCount = 0;
-  for (const a of articles) {
-    const title = (a?.title || '').toString().trim();
-    const description = (a?.description || '').toString().trim();
-    const link = (a?.url || '').toString().trim();
-    const keyPointersContent = (a?.html || a?.content || '').toString().trim();
-    const publishedAt = toRunDateKey(a?.published_at || runDateKey);
-
-    if (!title || !link) continue;
-
-    await EditorialItem.create({
-      userId,
-      runDateKey,
-      sourcesKey: source,
-      sourceKey: source,
-      title,
-      description: description || a?.plain_text?.slice(0, 500) || '',
-      link,
-      keyPointersContent,
-      publishedAt: publishedAt ? new Date(publishedAt) : null,
-      fingerprint: `${title}|${link}`.slice(0, 250),
-    });
-    savedCount++;
-  }
-
-  const now = new Date();
-  const allItems = await EditorialItem.find({
-    userId,
-    runDateKey: { $gte: new Date(new Date(now).setMonth(now.getMonth() - 6)).toISOString().slice(0, 10) },
-  }).lean();
-
-  const analysis = await editorialRepeatAnalyzerService.generateAllWindows({
-    userId,
-    generatedForDateKey: runDateKey,
-    items: allItems,
-  });
-
-  return { success: true, savedCount, runDateKey, analysis };
 }
 
 router.post('/articles/load-today/:source', async (req, res) => {
@@ -975,6 +971,247 @@ router.post('/articles/load-yesterday/:source', async (req, res) => {
     res.json({ success: true, source, mode: 'yesterday', savedCount: result.savedCount, runDateKey: result.runDateKey });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/articles/run-analysis', async (req, res) => {
+  try {
+    const now = new Date();
+    const allItems = await EditorialItem.find({
+      userId: req.user._id,
+      runDateKey: { $gte: new Date(new Date(now).setMonth(now.getMonth() - 6)).toISOString().slice(0, 10) },
+    }).lean();
+
+    if (!allItems.length) {
+      return res.json({ success: true, message: 'No articles to analyze' });
+    }
+
+    const latestKey = allItems.reduce((max, it) => it.runDateKey > max ? it.runDateKey : max, '');
+    const analysis = await editorialRepeatAnalyzerService.generateAllWindows({
+      userId: req.user._id,
+      generatedForDateKey: latestKey,
+      items: allItems,
+    });
+
+    const total = Object.values(analysis).reduce((sum, a) => sum + (a?.results?.length || 0), 0);
+    res.json({ success: true, topicsFound: total, analysis });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* Extract h2/h3 headings from HTML */
+function extractH2H3(html) {
+  if (!html) return '';
+  try {
+    const $ = cheerio.load(html);
+    return $('h2, h3').map((_, el) => $(el).text().trim()).get().join(' | ');
+  } catch { return ''; }
+}
+
+/* Get non-overlapping date windows */
+function getWindows(anchorDate) {
+  const d = (offset) => { const x = new Date(anchorDate); x.setDate(x.getDate() + offset); return x; };
+  const fmt = (dt) => `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
+  return {
+    '7d':   { start: fmt(d(-6)),   end: fmt(d(0)) },
+    '1m':   { start: fmt(d(-30)),  end: fmt(d(-7))  },
+    '6m':   { start: fmt(d(-180)), end: fmt(d(-31)) },
+    'gt6m': { start: '2000-01-01', end: fmt(d(-181)) },
+  };
+}
+
+// POST /api/admin/articles/export-analysis — download Excel + prompt
+router.post('/articles/export-analysis', async (req, res) => {
+  try {
+    const now = new Date();
+    const allItems = await EditorialItem.find({
+      userId: req.user._id,
+      runDateKey: { $gte: '2000-01-01' },
+    }).sort({ runDateKey: -1, createdAt: -1 }).lean();
+
+    if (!allItems.length) return res.status(400).json({ error: 'No articles found' });
+
+    const requestedWindows = req.body.windows || ['7d', '1m', '6m', 'gt6m'];
+    const windows = getWindows(now);
+    const workbook = new ExcelJS.Workbook();
+    const CATEGORIES = [
+      'Agriculture & Rural', 'Banking & Finance', 'Constitutional Developments',
+      'Culture & Heritage', 'Defense & Security', 'Disaster Management',
+      'Economy & Finance', 'Education & Health', 'Elections & Political',
+      'Energy & Resources', 'Environment & Climate', 'Federalism & States',
+      'Governance', 'Industry & Trade', 'International Relations',
+      'Jammu & Kashmir', 'Judiciary & Legal', 'Science & Tech',
+      'Social Issues', 'Transportation', 'Urban Infrastructure', 'Water Resources',
+    ];
+
+    const colDefs = [
+      { header: '_id', key: '_id', width: 28 },
+      { header: 'runDateKey', key: 'runDateKey', width: 14 },
+      { header: 'title', key: 'title', width: 50 },
+      { header: 'headings (h2/h3)', key: 'headings', width: 70 },
+    ];
+
+    for (const wt of requestedWindows) {
+      const range = windows[wt];
+      if (!range) continue;
+      const ws = workbook.addWorksheet(wt);
+      ws.columns = colDefs;
+      ws.getRow(1).font = { bold: true };
+
+      const filtered = allItems.filter(it => it.runDateKey >= range.start && it.runDateKey <= range.end);
+      for (const it of filtered) {
+        ws.addRow({
+          _id: it._id?.toString() || '',
+          runDateKey: it.runDateKey || '',
+          title: it.title || '',
+          headings: extractH2H3(it.keyPointersContent),
+        });
+      }
+    }
+
+    /* Prompt sheet */
+    const promptSheet = workbook.addWorksheet('Prompt');
+    const promptLines = [
+      '=== UPSC EDITORIAL ANALYSIS — INSTRUCTIONS ===',
+      '',
+      `Today's date: ${now.toISOString().slice(0, 10)}`,
+      '',
+      'You are a UPSC topic classifier. For each article below (identified by _id), read its title and h2/h3 headings, then assign:',
+      '',
+      '1. category — ONE broad UPSC topic from this list:',
+      ...CATEGORIES.map(c => `   - ${c}`),
+      '',
+      '2. topicLabel — concise 2-5 word sub-topic (e.g., "Smart Cities Mission", "NDRF Modernization")',
+      '',
+      '3. rationale — 1-sentence explanation of why this topic repeats in UPSC editorial coverage',
+      '',
+      'Return ONLY a JSON array:',
+      '[',
+      '  {"_id": "...", "category": "Urban Infrastructure", "topicLabel": "Smart Cities Mission", "rationale": "..."},',
+      '  {"_id": "...", "category": "Disaster Management", "topicLabel": "NDRF Modernization", "rationale": "..."}',
+      ']',
+      '',
+      'IMPORTANT: Group semantically similar articles together under the same topic.',
+      '',
+      '1. category — ONE broad UPSC topic (you can invent any meaningful category)',
+      '',
+      '2. topicLabel — concise 3-8 word topic name (e.g., "Digital Public Infrastructure and E-Governance")',
+      '',
+      '3. subTopics — array of 2-5 word sub-topic strings covered in these articles',
+      '',
+      '4. frequency — number of articles in this group',
+      '',
+      '5. rationale — 1-sentence trend insight',
+      '',
+      'Return ONLY a JSON array where each entry groups related articles by _id:',
+      '[',
+      '  {',
+      '    "_id": ["id1", "id2", "id3"],',
+      '    "category": "Governance & Economy",',
+      '    "topicLabel": "Digital Public Infrastructure",',
+      '    "subTopics": ["Ayushman Bharat", "SHE-LEAPS"],',
+      '    "frequency": 3,',
+      '    "rationale": "..."',
+      '  }',
+      ']',
+      '',
+      'IMPORTANT:',
+      '- Group related articles under one _id array — do NOT repeat the same topic',
+      '- Use exact _id strings from the sheets above',
+      '- Include ALL articles — no article should be left out',
+      '- Return this JSON via the import endpoint on the admin panel',
+    ];
+    promptSheet.columns = [{ header: 'Instructions', key: 'text', width: 120 }];
+    for (const line of promptLines) {
+      promptSheet.addRow({ text: line });
+    }
+
+    /* Write to buffer */
+    const buf = await workbook.xlsx.writeBuffer();
+
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="upsc-analysis-export-${now.toISOString().slice(0, 10)}.xlsx"`,
+    });
+    res.send(Buffer.from(buf));
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+// POST /api/admin/articles/import-analysis — accept external AI JSON (grouped format)
+router.post('/articles/import-analysis', async (req, res) => {
+  try {
+    const { results, windowType } = req.body;
+    if (!Array.isArray(results) || !results.length) {
+      return res.status(400).json({ error: 'results array required' });
+    }
+    const validWindows = ['7d', '1m', '6m', 'gt6m'];
+    const wt = validWindows.includes(windowType) ? windowType : '7d';
+
+    const userId = req.user._id;
+    const now = new Date();
+    const latestKey = now.toISOString().slice(0, 10);
+
+    /* Fetch all articles to map _id -> article */
+    const allItems = await EditorialItem.find({
+      userId,
+      runDateKey: { $gte: new Date(new Date(now).setMonth(now.getMonth() - 6)).toISOString().slice(0, 10) },
+    }).lean();
+    const idToArticle = {};
+    for (const it of allItems) idToArticle[it._id?.toString()] = it;
+
+    /* Build topics from grouped external AI format */
+    const topics = [];
+    const allArticleIds = new Set();
+
+    for (const entry of results) {
+      const ids = Array.isArray(entry._id) ? entry._id : [entry._id];
+      const articles = ids.map(id => idToArticle[id]).filter(Boolean);
+      if (!articles.length) continue;
+
+      ids.forEach(id => allArticleIds.add(id));
+
+      topics.push({
+        topicLabel: entry.topicLabel || entry.category || 'UPSC Topic',
+        category: entry.category || 'General Studies',
+        subTopics: entry.subTopics || [],
+        repeatCount: entry.frequency || articles.length,
+        rationale: entry.rationale || `Group of ${articles.length} articles on ${entry.topicLabel || entry.category}`,
+        comprehensiveLinks: articles.slice(0, 10).map(a => ({
+          _id: a._id,
+          title: a.title,
+          link: a.link,
+          sourceKey: a.sourceKey,
+        })),
+      });
+    }
+
+    if (!topics.length) return res.status(400).json({ error: 'No articles matched the given _ids' });
+
+    /* Save only to the specified window */
+    await EditorialRepeatAnalysis.findOneAndUpdate(
+      { userId, generatedForDateKey: latestKey, windowType: wt },
+      {
+        $set: {
+          rulesApplied: {
+            windowType: wt, method: 'external-ai-import',
+            totalArticles: allArticleIds.size, algorithmVersion: '3.0',
+          },
+          results: topics,
+        }
+      },
+      { upsert: true, returnDocument: 'after' }
+    );
+
+    res.json({
+      success: true,
+      message: `Imported ${topics.length} topic groups covering ${allArticleIds.size} articles for ${wt}`,
+      topicsFound: topics.length,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
   }
 });
 

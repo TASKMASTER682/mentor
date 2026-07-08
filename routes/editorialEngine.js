@@ -4,6 +4,7 @@ import { editorialScraperService } from '../services/editorialScraperService.js'
 import EditorialItem from '../models/EditorialItem.js';
 import EditorialRepeatAnalysis from '../models/EditorialRepeatAnalysis.js';
 import { editorialRepeatAnalyzerService } from '../services/editorialRepeatAnalyzerService.js';
+import * as cheerio from 'cheerio';
 
 const router = express.Router();
 
@@ -241,6 +242,33 @@ router.get('/items', async (req, res) => {
       .lean();
 
     res.json({ items });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+// GET /api/editorial-engine/items/jk — J&K related articles sorted by date
+router.get('/items/jk', async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const items = await EditorialItem.find({ userId }).sort({ runDateKey: -1, createdAt: -1 }).lean();
+
+    const jkPattern = /\b(jammu|kashmir|j&k|jammu\s*(and|&)\s*kashmir|ladakh|article\s*370|azad\s*kashmir|kargil|srinagar|kashmiri)\b/i;
+
+    const jkItems = items.filter(it => {
+      if (jkPattern.test(it.title)) return true;
+      if (it.keyPointersContent) {
+        try {
+          const $ = cheerio.load(it.keyPointersContent);
+          const headings = $('h2, h3').map((_, el) => $(el).text()).get();
+          if (headings.some(h => jkPattern.test(h))) return true;
+        } catch { /* skip */ }
+      }
+      if (it.description && jkPattern.test(it.description)) return true;
+      return false;
+    });
+
+    res.json({ items: jkItems, count: jkItems.length });
   } catch (err) {
     res.status(500).json({ error: err.message || String(err) });
   }

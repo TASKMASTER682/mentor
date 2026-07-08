@@ -3,6 +3,11 @@
   "version": "1.0.0",
   "type": "module",
   "main": "index.js",
+  "nodemonConfig": {
+    "ignore": [
+      "services/harvester/output/"
+    ]
+  },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js",
@@ -16,6 +21,7 @@
     "@mozilla/readability": "^0.6.0",
     "axios": "^1.13.5",
     "bcryptjs": "^3.0.3",
+    "big-integer": "^1.6.52",
     "cheerio": "^1.2.0",
     "cloudinary": "^2.9.0",
     "cors": "^2.8.6",
@@ -23,6 +29,7 @@
     "date-fns": "^4.1.0",
     "decompress": "^4.2.1",
     "dotenv": "^17.3.1",
+    "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "jimp": "^0.22.12",
     "jsdom": "^29.1.1",
@@ -44,6 +51,7 @@
     "razorpay": "^2.9.6",
     "resend": "^4.6.0",
     "socket.io": "^4.8.3",
+    "telegram": "^2.26.22",
     "tesseract.js": "^7.0.0",
     "uploadthing": "^6.12.0",
     "uuid": "^13.0.0",

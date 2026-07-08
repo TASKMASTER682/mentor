@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 
 const topicLinkSchema = new mongoose.Schema(
   {
+    _id: { type: String },
     title: { type: String, required: true, trim: true },
     description: { type: String, default: '' },
     link: { type: String, required: true },
@@ -13,6 +14,8 @@ const topicLinkSchema = new mongoose.Schema(
 const repeatResultSchema = new mongoose.Schema(
   {
     topicLabel: { type: String, required: true },
+    category: { type: String, default: '' },
+    subTopics: { type: [String], default: [] },
     repeatCount: { type: Number, required: true, default: 0 },
     comprehensiveLinks: { type: [topicLinkSchema], default: [] },
     rationale: { type: String, default: '' }
