@@ -14,6 +14,7 @@ const editorialItemSchema = new mongoose.Schema({
 
   speechContent: { type: String, default: '' },
   keyPointersContent: { type: String, default: '' },
+  microNotes: { type: String, default: '' },
 
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }

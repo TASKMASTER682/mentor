@@ -322,15 +322,15 @@ router.get('/items/:id', async (req, res) => {
   }
 });
 
-// PUT /api/editorial-engine/items/:id/content — save speech & key pointers HTML
+// PUT /api/editorial-engine/items/:id/content — save key pointers & micro notes HTML
 router.put('/items/:id/content', async (req, res) => {
   try {
     const userId = req.user._id;
-    const { speechContent, keyPointersContent } = req.body;
+    const { keyPointersContent, microNotes } = req.body;
 
     const item = await EditorialItem.findOneAndUpdate(
       { _id: req.params.id, userId },
-      { speechContent: speechContent || '', keyPointersContent: keyPointersContent || '' },
+      { keyPointersContent: keyPointersContent || '', microNotes: microNotes || '' },
       { new: true }
     ).lean();
 
@@ -338,81 +338,6 @@ router.put('/items/:id/content', async (req, res) => {
     res.json({ success: true, item });
   } catch (err) {
     res.status(500).json({ error: err.message || String(err) });
-  }
-});
-
-// POST /api/editorial-engine/items/:id/generate-speech — AI generates speech from keyPointersContent
-router.post('/items/:id/generate-speech', async (req, res) => {
-  try {
-    const userId = req.user._id;
-    const item = await EditorialItem.findOne({ _id: req.params.id, userId }).lean();
-    if (!item) return res.status(404).json({ error: 'Item not found' });
-
-    const htmlContent = item.keyPointersContent || '';
-    if (!htmlContent) return res.status(400).json({ error: 'No keyPointersContent to generate speech from' });
-
-    const axiosMod = await import('axios');
-    const axios = axiosMod.default;
-
-    const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
-    if (!NVIDIA_API_KEY) return res.status(500).json({ error: 'NVIDIA_API_KEY not configured' });
-
-    const model = process.env.NVIDIA_MODEL || 'meta/llama-4-maverick-17b-128e-instruct';
-    const invokeUrl = process.env.NVIDIA_CHAT_COMPLETIONS_URL || 'https://integrate.api.nvidia.com/v1/chat/completions';
-
-    const systemPrompt = `You are a UPSC speech-composer. Convert the given editorial HTML content into a structured speech that a student reads aloud for speaking practice.
-
-STRICT FORMAT — output ONLY valid HTML with these tags (no markdown, no JSON, no extra text):
-- <p> for each spoken paragraph
-- <h2> for section headings (Opening, Background, Main Issue, etc.)
-
-SPEECH STRUCTURE (follow this order exactly):
-1. Opening / Context: Start with <p>Good morning. Today, I would like to talk about <topic>.</p>
-2. Background: <p>Why the issue exists — necessary context.</p>
-3. Main Problem / Core Issue: <p>The central concern.</p>
-4. Causes / Reasons: <p>Why the problem exists.</p>
-5. Impact / Significance: <p>Why it matters for India — society, economy, governance, security, etc.</p>
-6. Challenges / Counter Arguments: <p>Present the other side if relevant.</p>
-7. Solutions / Way Forward: <p>Practical reforms and suggestions.</p>
-8. Personal Opinion: <p>In my opinion... (balanced UPSC-style view)</p>
-9. Conclusion: <p>To conclude... (summarize positively)</p>
-
-WRITING STYLE:
-- Natural, conversational tone — as if speaking to an audience
-- Sound like a UPSC candidate explaining an issue, NOT reading an article
-- Avoid robotic language
-- Avoid excessive facts, dates, statistics, jargon unless necessary
-- Smooth transitions between ideas
-
-LENGTH: Concise — roughly 300–500 words total.`;
-
-    const response = await axios.post(invokeUrl, {
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Convert this editorial HTML into structured speech HTML:\n\n${htmlContent.slice(0, 15000)}` }
-      ],
-      max_tokens: 3000,
-      temperature: 0.3
-    }, {
-      headers: {
-        Authorization: `Bearer ${NVIDIA_API_KEY}`,
-        Accept: 'application/json'
-      },
-      timeout: 120000
-    });
-
-    const speechText = response.data?.choices?.[0]?.message?.content?.trim() || '';
-
-    await EditorialItem.updateOne(
-      { _id: item._id },
-      { speechContent: speechText }
-    );
-
-    res.json({ success: true, speechContent: speechText });
-  } catch (err) {
-    console.error('generate-speech error:', err);
-    res.status(500).json({ error: err.message || String(err), stack: err.stack });
   }
 });
 
